@@ -1,0 +1,91 @@
+use crate::ast::Expr;
+use crate::ast::Stmt;
+use crate::ast::Binding;
+use crate::ast::Type;
+use crate::ast::Lit;
+use crate::ast::Program;
+use std::str::FromStr;
+
+grammar;
+
+pub Prog: Box<Program> = <ss:SemiCol<Stmt>> => Box::new(Program { stmts : ss });
+
+pub Stmt: Stmt = {
+    "let" <n:Name> ":" <t:Type> "=" <e:Expr>    => Stmt::Decl(Box::new(Expr::Variable(n)), t, e),
+    "let" <n:Name> "=" <e:Expr>                 => Stmt::Decl(Box::new(Expr::Variable(n)), Box::new(Type::Infer), e),
+    <e:Expr>                                    => Stmt::Expr(e),
+    "print" <e:Expr>                            => Stmt::Print(e),
+};
+
+pub Expr: Box<Expr> = {
+    Abs_Expr                                            => <>,
+    "let" <n:Name> "=" <e1:Expr> "in" <e2:Expr>         => Box::new(Expr::Let(n, e1, e2)),
+    "if" <c:Expr> "then" <e1:Expr> "else" <e2: Expr>    => Box::new(Expr::IfElse(c, e1, e2)),
+    // TODO: pattern matching
+    App_Expr                                            => <>,
+};
+
+// TODO: function currying (multiple binders)
+Abs_Expr: Box<Expr> = {
+    "\\" <b:Binding> "=>" <t:Expr>                      => Box::new(Expr::Abstraction(b, t)),
+}
+
+App_Expr: Box<Expr> = {
+    Term                        => <>,
+    <t1:App_Expr> <t2:Term>     => Box::new(Expr::Application(t1, t2))
+};
+
+Term: Box<Expr> = {
+    Name                        => Box::new(Expr::Variable(<>)),
+    Literal                     => Box::new(Expr::Literal(<>)),
+    "(" <e:Expr> ")"            => e
+};
+
+Binding: Box<Binding> = {
+    Name                            => Box::new(Binding(<>, Box::new(Type::Infer))),
+    "(" <n:Name> ":" <t:Type> ")"   => Box::new(Binding(n, t)),
+}
+
+Name: String = {
+    r"[a-zA-Z_][a-zA-Z0-9_]*"   => <>.to_string()
+};
+
+Literal: Box<Lit> = {
+    <n:r"-?[0-9]+\.[0-9]+"> => Box::new(Lit::Float(f32::from_str(n).unwrap())),
+    <n:r"-?[0-9]+">         => Box::new(Lit::Int(i32::from_str(n).unwrap())),
+    "true"                  => Box::new(Lit::Bool(true)),
+    "false"                 => Box::new(Lit::Bool(false)),
+    <s:r#"\"[^"]*\""#>      => Box::new(Lit::Str(s[1..s.len()-1].to_string())),
+    "()"                    => Box::new(Lit::Unit),
+}
+
+// ----------------------------------------------------------------------------
+// Types
+// ----------------------------------------------------------------------------
+
+Type: Box<Type> = {
+    SimpleType => <>,
+    <t1:SimpleType> "=>" <t2:Type> => Box::new(Type::Fn(t1, t2))
+};
+
+SimpleType: Box<Type> = {
+    "int"       => Box::new(Type::Int),
+    "bool"      => Box::new(Type::Bool),
+    "float"     => Box::new(Type::Float),
+    "str"       => Box::new(Type::Str),
+    "()"        => Box::new(Type::Unit),
+};
+
+// ----------------------------------------------------------------------------
+// Util
+// ----------------------------------------------------------------------------
+
+SemiCol<T>: Vec<T> = {
+    <mut vec:(<T> ";")*> <e:T?> => match e {
+        None => vec,
+        Some(e) => {
+            vec.push(e);
+            vec
+        }
+    }
+};
