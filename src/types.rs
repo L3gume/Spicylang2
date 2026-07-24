@@ -131,13 +131,30 @@ impl Monotype {
                 Some(monotype) => monotype.clone(),
                 _ => self.clone()
             },
-            Self::TypeFuncApplication(func, types) => 
+            Self::TypeFuncApplication(func, types) =>
                 Self::TypeFuncApplication(func.clone(), types.iter().map(|typ| typ.instantiate(mappings)).collect())
+        }
+    }
+
+    pub fn free_variables(&self) -> Vec<String> {
+        match self {
+            Self::TypeVariable(v) => vec![v.clone()],
+            Self::TypeFuncApplication(_, ts) => ts.iter().flat_map(|t| t.free_variables()).collect()
+        }
+    }
+
+    pub fn contains(&self, typ : &Monotype) -> bool {
+        match typ {
+            Self::TypeVariable(v) => match self {
+                Self::TypeVariable(v2) => v == v2,
+                Self::TypeFuncApplication(_, ts) => ts.iter().any(|t| t.contains(typ))
+            },
+            Self::TypeFuncApplication(_, _) => false
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Polytype {
     Mono(Box<Monotype>),
     TypeQuantifier(String, Box<Polytype>),
@@ -160,8 +177,42 @@ impl Polytype {
             }
         }
     }
+
+    pub fn free_variables(&self) -> Vec<String> {
+        match self {
+            Self::Mono(mon) => mon.free_variables(),
+            Self::TypeQuantifier(quant, typ) =>
+                typ.free_variables().into_iter().filter(|n| n != quant).collect()
+        }
+    }
 }
 
+#[derive(Debug, PartialEq)]
+pub struct Substitution {
+    pub variables : HashMap<String, Monotype>
+}
+
+impl Substitution {
+    pub fn new() -> Substitution {
+        Substitution { variables: HashMap::new() }
+    }
+
+    pub fn make(map: HashMap<String, Monotype>) -> Substitution {
+        Substitution { variables : map }
+    }
+
+    pub fn combine(&self, s2 : Substitution) -> Substitution {
+        let mut applied: HashMap<String, Monotype> = s2.variables.iter()
+            .map(|(k, mon)| (k.clone(), mon.apply(self)))
+            .collect();
+        for (k, mon) in &self.variables {
+            if !s2.variables.contains_key(k) {
+                applied.insert(k.clone(), mon.clone());
+            }
+        }
+        Substitution::make(applied)
+    }
+}
 
 #[derive(Debug)]
 pub struct TypeContext {
@@ -187,53 +238,69 @@ impl TypeContext {
         self.type_var_ctr += 1;
         ret
     }
-}
 
-#[derive(Debug)]
-pub struct Substitution {
-    pub variables : HashMap<String, Monotype>
-}
-
-impl Substitution {
-    pub fn new() -> Substitution {
-        Substitution { variables: HashMap::new() }
+    pub fn free_variables(&self) -> Vec<String> {
+        self.variables.values().flat_map(|t| t.free_variables()).collect()
     }
 
-    pub fn make(map: HashMap<String, Monotype>) -> Substitution {
-        Substitution { variables : map }
-    }
-
-    pub fn combine(&self, s2 : &Substitution) -> Substitution {
-        let mut applied: HashMap<String, Monotype> = s2.variables.iter()
-            .map(|(k, mon)| (k.clone(), mon.apply(self)))
-            .collect();
-        for (k, mon) in &self.variables {
-            if !s2.variables.contains_key(k) {
-                applied.insert(k.clone(), mon.clone());
-            }
+    pub fn generalise(&self, typ : &Monotype) -> Polytype {
+        let quants = diff(typ.free_variables(), self.free_variables());
+        let mut poly = Polytype::Mono(Box::new(typ.clone()));
+        for q in quants {
+            poly = Polytype::TypeQuantifier(q, Box::new(poly));
         }
-        Substitution::make(applied)
+        poly
     }
 }
 
-#[derive(Debug)]
+pub fn unify(typ1 : &Monotype, typ2 : &Monotype) -> Result<Substitution, UnificationError> {
+    match typ1 {
+        Monotype::TypeVariable(v1) => match typ2 {
+            Monotype::TypeVariable(v2) =>
+                if v1 == v2 {
+                    Ok(Substitution::new())
+                } else {
+                    if typ2.contains(typ1) {
+                        Err(UnificationError { message: "Infinite recursive type".to_string() })
+                    } else {
+                        Ok(Substitution::make(HashMap::from([(v1.clone(), typ2.clone())])))
+                    }
+                },
+            _ => if typ2.contains(typ1) {
+                    Err(UnificationError { message: "Infinite recursive type".to_string() })
+                } else {
+                    Ok(Substitution::make(HashMap::from([(v1.clone(), typ2.clone())])))
+                }
+        }
+        Monotype::TypeFuncApplication(f1, ts1) => match typ2 {
+            Monotype::TypeVariable(_) => unify(typ2, typ1),
+            Monotype::TypeFuncApplication(f2, ts2 ) =>
+                if f1 != f2 {
+                    Err(UnificationError { message: format!("Type function application mismatch: {:?} != {:?}", f1, f2) })
+                } else {
+                    if ts1.len() != ts2.len() {
+                        Err(UnificationError { message: format!("Type functions have different number of args: {:?}, {:?}", ts1, ts2) })
+                    } else {
+                        let mut sub = Substitution::new();
+                        for (t1, t2) in ts1.iter().zip(ts2.iter()) {
+                            sub = sub.combine(unify(&t1.apply(&sub), &t2.apply(&sub))?);
+                        }
+                        Ok(sub)
+                    }
+                }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub struct UnificationError {
     pub message : String
     // TODO: location information?
 }
 
-pub fn unify(typ1 : &Monotype, typ2 : &Monotype) -> Result<Substitution, UnificationError> {
-    // TODO: Implement
-    Ok(Substitution::new())
-}
 
-pub fn instantiate(typ : &Monotype) -> Monotype {
-    todo!()
-}
-
-
-pub fn generalise() {
-    // TODO: Implement
+fn diff<T>(v1 : Vec<T>, v2 : Vec<T>) -> Vec<T> where T : PartialEq + Clone {
+    v1.into_iter().filter(|x| !v2.contains(x)).collect()
 }
 
 // TODO: Second arg is expr
@@ -290,7 +357,7 @@ mod tests {
     fn combine_empty_both() {
         let s1 = sub(vec![]);
         let s2 = sub(vec![]);
-        let result = s1.combine(&s2);
+        let result = s1.combine(s2);
         assert!(result.variables.is_empty());
     }
 
@@ -298,7 +365,7 @@ mod tests {
     fn combine_empty_s1() {
         let s1 = sub(vec![]);
         let s2 = sub(vec![("x", int())]);
-        let result = s1.combine(&s2);
+        let result = s1.combine(s2);
         assert_eq!(result.variables.len(), 1);
         assert_eq!(result.variables.get("x"), Some(&int()));
     }
@@ -307,7 +374,7 @@ mod tests {
     fn combine_empty_s2() {
         let s1 = sub(vec![("x", int())]);
         let s2 = sub(vec![]);
-        let result = s1.combine(&s2);
+        let result = s1.combine(s2);
         assert_eq!(result.variables.len(), 1);
         assert_eq!(result.variables.get("x"), Some(&int()));
     }
@@ -316,7 +383,7 @@ mod tests {
     fn combine_disjoint() {
         let s1 = sub(vec![("a", int())]);
         let s2 = sub(vec![("b", bool())]);
-        let result = s1.combine(&s2);
+        let result = s1.combine(s2);
         assert_eq!(result.variables.len(), 2);
         assert_eq!(result.variables.get("a"), Some(&int()));
         assert_eq!(result.variables.get("b"), Some(&bool()));
@@ -326,7 +393,7 @@ mod tests {
     fn combine_overlapping() {
         let s1 = sub(vec![("x", int())]);
         let s2 = sub(vec![("x", bool())]);
-        let result = s1.combine(&s2);
+        let result = s1.combine(s2);
         assert_eq!(result.variables.len(), 1);
         assert_eq!(result.variables.get("x"), Some(&bool()));
     }
@@ -335,7 +402,7 @@ mod tests {
     fn combine_s2_chained_through_s1() {
         let s1 = sub(vec![("x", int())]);
         let s2 = sub(vec![("y", var("x"))]);
-        let result = s1.combine(&s2);
+        let result = s1.combine(s2);
         assert_eq!(result.variables.len(), 2);
         assert_eq!(result.variables.get("x"), Some(&int()));
         assert_eq!(result.variables.get("y"), Some(&int()));
@@ -345,7 +412,7 @@ mod tests {
     fn combine_function_type_through_s1() {
         let s1 = sub(vec![("x", var("y"))]);
         let s2 = sub(vec![("z", fn_type(bool(), var("x")))]);
-        let result = s1.combine(&s2);
+        let result = s1.combine(s2);
         assert_eq!(result.variables.len(), 2);
         assert_eq!(result.variables.get("x"), Some(&var("y")));
         assert_eq!(result.variables.get("z"), Some(&fn_type(bool(), var("y"))));
@@ -355,7 +422,7 @@ mod tests {
     fn combine_multi_chain() {
         let s1 = sub(vec![("a", int()), ("b", var("a"))]);
         let s2 = sub(vec![("b", bool()), ("c", var("b"))]);
-        let result = s1.combine(&s2);
+        let result = s1.combine(s2);
         assert_eq!(result.variables.len(), 3);
         assert_eq!(result.variables.get("a"), Some(&int()));
         assert_eq!(result.variables.get("b"), Some(&bool()));
@@ -390,6 +457,10 @@ mod tests {
     }
 
     fn mappings(pairs: Vec<(&str, Monotype)>) -> HashMap<String, Monotype> {
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn ctx_map(pairs: Vec<(&str, Polytype)>) -> HashMap<String, Polytype> {
         pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
     }
 
@@ -455,5 +526,125 @@ mod tests {
         let mut ctx = TypeContext::new();
         let mut map = mappings(vec![]);
         assert_eq!(p.instantiate(&mut ctx, &mut map), fn_type(var("t0"), bool()));
+    }
+
+    #[test]
+    fn generalise_no_vars_in_type() {
+        let ctx = TypeContext::make(ctx_map(vec![("x", mono(int()))]));
+        assert_eq!(ctx.generalise(&int()), mono(int()));
+    }
+
+    #[test]
+    fn generalise_single_var_not_in_context() {
+        let ctx = TypeContext::new();
+        assert_eq!(ctx.generalise(&var("a")), forall("a", mono(var("a"))));
+    }
+
+    #[test]
+    fn generalise_single_var_in_context() {
+        let ctx = TypeContext::make(ctx_map(vec![("x", mono(fn_type(var("a"), int())))]));
+        assert_eq!(ctx.generalise(&var("a")), mono(var("a")));
+    }
+
+    #[test]
+    fn generalise_fn_some_vars_in_context() {
+        let ctx = TypeContext::make(ctx_map(vec![("x", mono(fn_type(var("a"), int())))]));
+        assert_eq!(
+            ctx.generalise(&fn_type(var("a"), var("b"))),
+            forall("b", mono(fn_type(var("a"), var("b"))))
+        );
+    }
+
+    #[test]
+    fn generalise_fn_no_vars_in_context() {
+        let ctx = TypeContext::new();
+        assert_eq!(
+            ctx.generalise(&fn_type(var("a"), var("b"))),
+            forall("b", forall("a", mono(fn_type(var("a"), var("b")))))
+        );
+    }
+
+    #[test]
+    fn generalise_fn_all_vars_in_context() {
+        let ctx = TypeContext::make(ctx_map(vec![
+            ("x", mono(fn_type(var("a"), var("b")))),
+        ]));
+        assert_eq!(
+            ctx.generalise(&fn_type(var("a"), var("b"))),
+            mono(fn_type(var("a"), var("b")))
+        );
+    }
+
+    fn ok(sub_pairs: Vec<(&str, Monotype)>) -> Result<Substitution, UnificationError> {
+        Ok(sub(sub_pairs))
+    }
+
+    fn err(msg: &str) -> Result<Substitution, UnificationError> {
+        Err(UnificationError { message: msg.to_string() })
+    }
+
+    #[test]
+    fn unify_same_var() {
+        assert_eq!(unify(&var("a"), &var("a")), ok(vec![]));
+    }
+
+    #[test]
+    fn unify_diff_vars() {
+        assert_eq!(unify(&var("a"), &var("b")), ok(vec![("a", var("b"))]));
+    }
+
+    #[test]
+    fn unify_var_and_concrete() {
+        assert_eq!(unify(&var("a"), &int()), ok(vec![("a", int())]));
+    }
+
+    #[test]
+    fn unify_concrete_and_var() {
+        assert_eq!(unify(&int(), &var("a")), ok(vec![("a", int())]));
+    }
+
+    #[test]
+    fn unify_same_concrete() {
+        assert_eq!(unify(&int(), &int()), ok(vec![]));
+    }
+
+    #[test]
+    fn unify_different_concretes() {
+        let result = unify(&int(), &bool());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unify_infinite_type() {
+        let result = unify(&var("a"), &fn_type(var("a"), int()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unify_infinite_nested() {
+        let result = unify(&var("a"), &fn_type(int(), var("a")));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unify_fn_same_structure() {
+        assert_eq!(
+            unify(&fn_type(var("a"), int()), &fn_type(var("b"), int())),
+            ok(vec![("a", var("b"))])
+        );
+    }
+
+    #[test]
+    fn unify_fn_chain_substitution() {
+        assert_eq!(
+            unify(&fn_type(var("a"), int()), &fn_type(int(), var("b"))),
+            ok(vec![("a", int()), ("b", int())])
+        );
+    }
+
+    #[test]
+    fn unify_fn_different_constructors() {
+        let result = unify(&fn_type(int(), int()), &fn_type(int(), bool()));
+        assert!(result.is_err());
     }
 }
