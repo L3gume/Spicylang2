@@ -9,7 +9,7 @@ pub enum Lit {
     Unit,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Type {
     Infer,
     Unit,

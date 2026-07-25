@@ -64,6 +64,25 @@
  *
  *  Let bindings have type of last expression
  *
+ * If-Then-Else expr:
+ *
+ *   Γ ⊢ e₀ : Bool    Γ ⊢ e₁ : τ    Γ ⊢ e₂ : τ
+ *  ---------------------------------------------
+ *          Γ ⊢ if e₀ then e₁ else e₂ : τ
+ *
+ *  If it follows from context Γ that e₀ has type Bool and that e₁ and e₂ have type τ.
+ *  Then
+ *  It follows from context Γ that expr if e₀ then e₁ else e₂ has type τ
+ *
+ * Literal expr:
+ *
+ *   ─────────────
+ *   Γ ⊢ lit : τ(lit)
+ *
+ *  Where τ(lit) is the literal's fixed type — Int, Float, Bool, Str, or Unit.
+ *  Literals are axioms: they contribute no premises and type independently of Γ.
+ *  They constrain other rules by forcing unification with their concrete type.
+ *
  * Instantiation:
  *
  *  Γ ⊢ e : σₐ    σₐ ⊑ σᵦ
@@ -87,12 +106,12 @@
  *  then
  *  It follows from context that expression e is of polytype ∀α. σ (this means α can be anything)
  *
- *  TODO: Type inference rules for other expressions
  */
 use std::collections::HashMap;
 
-use crate::ast::{Expr, Type};
+use crate::ast::{Binding, Expr, Type};
 use crate::ast::Expr::*;
+use crate::types::Monotype::TypeFuncApplication;
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +132,10 @@ pub enum Monotype {
 }
 
 impl Monotype {
+    pub fn default() -> Monotype {
+        Self::TypeVariable(String::new())
+    }
+
     pub fn apply(&self, sub : &Substitution) -> Monotype {
         match self.clone() {
             Self::TypeVariable(name) =>
@@ -168,12 +191,13 @@ impl Polytype {
         }
     }
 
-    pub fn instantiate(&self, ctx : &mut TypeContext, mappings : &mut HashMap<String, Monotype>) -> Monotype {
+    pub fn instantiate(&self, ctx : &mut TypeContext, mappings : Option<HashMap<String, Monotype>>) -> Monotype {
+        let mut maps = mappings.unwrap_or(HashMap::new());
         match self {
-            Self::Mono(mon) => mon.instantiate(mappings),
+            Self::Mono(mon) => mon.instantiate(&mut maps),
             Self::TypeQuantifier(quant, typ) => {
-                mappings.insert(quant.clone(), Monotype::TypeVariable(ctx.new_typevar()));
-                typ.instantiate(ctx, mappings)
+                maps.insert(quant.clone(), Monotype::TypeVariable(ctx.new_typevar()));
+                typ.instantiate(ctx, Some(maps))
             }
         }
     }
@@ -187,7 +211,7 @@ impl Polytype {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Substitution {
     pub variables : HashMap<String, Monotype>
 }
@@ -227,6 +251,14 @@ impl TypeContext {
 
     pub fn make(map: HashMap<String, Polytype>) -> TypeContext {
         TypeContext { type_var_ctr : 0, variables : map }
+    }
+
+    pub fn get(&self, name : &String) -> Option<Polytype> {
+        self.variables.get(name).cloned()
+    }
+
+    pub fn add(&mut self, name : String, typ : Polytype) {
+        self.variables.insert(name, typ);
     }
 
     pub fn apply(&self, sub : &Substitution) -> TypeContext {
@@ -303,16 +335,46 @@ fn diff<T>(v1 : Vec<T>, v2 : Vec<T>) -> Vec<T> where T : PartialEq + Clone {
     v1.into_iter().filter(|x| !v2.contains(x)).collect()
 }
 
-// TODO: Second arg is expr
-pub fn algo_w(context : &TypeContext, expr : &Expr) -> Substitution {
-    // TODO: Implement
+pub fn type_to_typefn(typ : &Type, context : &mut TypeContext) -> Monotype {
+    match typ {
+        Type::Infer => Monotype::TypeVariable(context.new_typevar()),
+        Type::Int => Monotype::TypeFuncApplication(Box::new(TypeFunction::Int), Vec::new()),
+        Type::Unit => Monotype::TypeFuncApplication(Box::new(TypeFunction::Unit), Vec::new()),
+        Type::Float => Monotype::TypeFuncApplication(Box::new(TypeFunction::Float), Vec::new()),
+        Type::Bool => Monotype::TypeFuncApplication(Box::new(TypeFunction::Bool), Vec::new()),
+        Type::Str => Monotype::TypeFuncApplication(Box::new(TypeFunction::Str), Vec::new()),
+        Type::Fn(t1, t2) => Monotype::TypeFuncApplication(Box::new(TypeFunction::Fn), vec!(type_to_typefn(t1, context), type_to_typefn(t2, context))),
+    }
+}
+
+pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution, Monotype), UnificationError> {
     match expr {
-        Variable(name) => Substitution::new(),
-        Abstraction(bind, exp) => Substitution::new(),
-        Application(exp1, exp2) => Substitution::new(),
-        Let(name, exp1, exp2) => Substitution::new(),
-        Literal(lit) => Substitution::new(),
-        IfElse(cond, exp1, exp2) => Substitution::new(),
+        Variable(name) => match context.get(name) {
+            Some(poly) => {
+                Ok((Substitution::new(), poly.instantiate(context, None)))
+            }
+            _ => Err(UnificationError { message: format!("Undefined variable {}!", name) } )
+        },
+        Abstraction(bind, exp) => {
+            let Binding(name, typp) = &**bind;
+            let beta_mon = type_to_typefn(&typp, context);
+            let beta_poly = Polytype::Mono(Box::new(beta_mon.clone()));
+            context.add(name.clone(), beta_poly);
+            let (sub1, t1) = algo_w(context, exp)?;
+            let beta = Monotype::TypeFuncApplication(Box::new(TypeFunction::Fn), vec!(beta_mon, t1)).apply(&sub1);
+            Ok((sub1, beta))
+        },
+        Application(exp1, exp2) => {
+            let (s1, t1) = algo_w(context, exp1)?;
+            *context = context.apply(&s1);
+            let (s2, t2) = algo_w(context, exp2)?;
+            let beta = TypeFuncApplication(Box::new(TypeFunction::Fn), vec!(t2, Monotype::TypeVariable(context.new_typevar())));
+            let s3 = unify(&t1.apply(&s2), &beta)?;
+            Ok((s1.combine(s2).combine(s3.clone()), beta.apply(&s3)))
+        },
+        Let(name, exp1, exp2) => Ok((Substitution::new(), Monotype::default())),
+        Literal(lit) => Ok((Substitution::new(), Monotype::default())),
+        IfElse(cond, exp1, exp2) => Ok((Substitution::new(), Monotype::default())),
     }
 }
 
