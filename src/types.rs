@@ -22,9 +22,6 @@
  *
  *   Error(?)
  *
- *
- *
- *
  * Variable:
  *
  *   x : σ ∈ Γ      if variable x of polytype σ is in the typing context
@@ -109,13 +106,14 @@
  */
 use std::collections::HashMap;
 
-use crate::ast::{Binding, Expr, Type, Lit};
+use crate::ast::{Binding, Expr, Lit, Type};
 use crate::ast::Expr::*;
 use crate::types::Monotype::TypeFuncApplication;
 
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TypeFunction {
+pub enum TypeFunc {
+    Infer,
     Unit,
     Int,
     Float,
@@ -123,12 +121,13 @@ pub enum TypeFunction {
     Str,
     Fn, // ->
     List,
+    Enum(String)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Monotype {
     TypeVariable(String),
-    TypeFuncApplication(Box<TypeFunction>, Vec<Monotype>),
+    TypeFuncApplication(Box<TypeFunc>, Vec<Monotype>),
 }
 
 impl Monotype {
@@ -176,26 +175,36 @@ impl Monotype {
         }
     }
 
+    pub fn infer() -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Infer), vec![])
+    }
+
     pub fn bool() -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Bool), vec![])
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Bool), vec![])
     }
+
     pub fn int() -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Int), vec![])
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Int), vec![])
     }
+
     pub fn float() -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Float), vec![])
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Float), vec![])
     }
+
     pub fn string() -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Str), vec![])
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Str), vec![])
     }
+
     pub fn unit() -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Unit), vec![])
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Unit), vec![])
     }
+
     pub fn func(vars : Vec<Monotype>) -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Fn), vars)
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Fn), vars)
     }
+
     pub fn list(vars : Vec<Monotype>) -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::List), vars)
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::List), vars)
     }
 }
 
@@ -358,14 +367,10 @@ fn diff<T>(v1 : Vec<T>, v2 : Vec<T>) -> Vec<T> where T : PartialEq + Clone {
 }
 
 pub fn type_to_typefn(typ : &Type, context : &mut TypeContext) -> Monotype {
-    match typ {
-        Type::Infer => Monotype::TypeVariable(context.new_typevar()),
-        Type::Int => Monotype::TypeFuncApplication(Box::new(TypeFunction::Int), Vec::new()),
-        Type::Unit => Monotype::TypeFuncApplication(Box::new(TypeFunction::Unit), Vec::new()),
-        Type::Float => Monotype::TypeFuncApplication(Box::new(TypeFunction::Float), Vec::new()),
-        Type::Bool => Monotype::TypeFuncApplication(Box::new(TypeFunction::Bool), Vec::new()),
-        Type::Str => Monotype::TypeFuncApplication(Box::new(TypeFunction::Str), Vec::new()),
-        Type::Fn(t1, t2) => Monotype::TypeFuncApplication(Box::new(TypeFunction::Fn), vec!(type_to_typefn(t1, context), type_to_typefn(t2, context))),
+    match &typ.t {
+        Monotype::TypeFuncApplication(func, _) if **func == TypeFunc::Infer
+            => Monotype::TypeVariable(context.new_typevar()),
+        _ => typ.t.clone()
     }
 }
 
@@ -383,14 +388,14 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             let beta_poly = Polytype::Mono(Box::new(beta_mon.clone()));
             context.add(name.clone(), beta_poly);
             let (sub1, t1) = algo_w(context, exp)?;
-            let beta = Monotype::TypeFuncApplication(Box::new(TypeFunction::Fn), vec!(beta_mon, t1)).apply(&sub1);
+            let beta = Monotype::TypeFuncApplication(Box::new(TypeFunc::Fn), vec!(beta_mon, t1)).apply(&sub1);
             Ok((sub1, beta))
         },
         Application(exp1, exp2) => {
             let (s1, t1) = algo_w(context, exp1)?;
             *context = context.apply(&s1);
             let (s2, t2) = algo_w(context, exp2)?;
-            let beta = TypeFuncApplication(Box::new(TypeFunction::Fn), vec!(t2, Monotype::TypeVariable(context.new_typevar())));
+            let beta = TypeFuncApplication(Box::new(TypeFunc::Fn), vec!(t2, Monotype::TypeVariable(context.new_typevar())));
             let s3 = unify(&t1.apply(&s2), &beta)?;
             Ok((s1.combine(s2).combine(s3.clone()), beta.apply(&s3)))
         },
@@ -428,7 +433,7 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
 }
 
 // TODO: Second arg is expr
-pub fn algo_m(context : &TypeContext, expr : &Expr, typ : &Type) -> Substitution {
+pub fn algo_m(context : &TypeContext, expr : &Expr, typ : &TypeFunc) -> Substitution {
     // TODO: Implement
     match expr {
         Variable(name) => Substitution::new(),
@@ -449,15 +454,15 @@ mod tests {
     }
 
     fn int() -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Int), vec![])
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Int), vec![])
     }
 
     fn bool() -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Bool), vec![])
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Bool), vec![])
     }
 
     fn fn_type(arg: Monotype, ret: Monotype) -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunction::Fn), vec![arg, ret])
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Fn), vec![arg, ret])
     }
 
     fn sub(pairs: Vec<(&str, Monotype)>) -> Substitution {

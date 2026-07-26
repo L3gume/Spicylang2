@@ -4,6 +4,7 @@ use crate::ast::Binding;
 use crate::ast::Type;
 use crate::ast::Lit;
 use crate::ast::Program;
+use crate::types::Monotype;
 use std::str::FromStr;
 
 grammar;
@@ -12,7 +13,7 @@ pub Prog: Box<Program> = <ss:SemiCol<Stmt>> => Box::new(Program { stmts : ss });
 
 pub Stmt: Stmt = {
     "let" <n:Name> ":" <t:Type> "=" <e:Expr>    => Stmt::Decl(Box::new(Expr::Variable(n)), t, e),
-    "let" <n:Name> "=" <e:Expr>                 => Stmt::Decl(Box::new(Expr::Variable(n)), Box::new(Type::Infer), e),
+    "let" <n:Name> "=" <e:Expr>                 => Stmt::Decl(Box::new(Expr::Variable(n)), Box::new(Type { t : Monotype::infer() }), e),
     <e:Expr>                                    => Stmt::Expr(e),
     "print" <e:Expr>                            => Stmt::Print(e),
 };
@@ -42,7 +43,7 @@ Term: Box<Expr> = {
 };
 
 Binding: Box<Binding> = {
-    Name                            => Box::new(Binding(<>, Box::new(Type::Infer))),
+    Name                            => Box::new(Binding(<>, Box::new(Type { t: Monotype::infer() }))),
     "(" <n:Name> ":" <t:Type> ")"   => Box::new(Binding(n, t)),
 }
 
@@ -65,15 +66,15 @@ Literal: Box<Lit> = {
 
 Type: Box<Type> = {
     SimpleType => <>,
-    <t1:SimpleType> "=>" <t2:Type> => Box::new(Type::Fn(t1, t2))
+    <t1:SimpleType> "=>" <t2:Type> => Box::new(Type { t: Monotype::func(vec![t1.t.clone(), t2.t.clone()]) })
 };
 
 SimpleType: Box<Type> = {
-    "int"       => Box::new(Type::Int),
-    "bool"      => Box::new(Type::Bool),
-    "float"     => Box::new(Type::Float),
-    "str"       => Box::new(Type::Str),
-    "()"        => Box::new(Type::Unit),
+    "int"       => Box::new(Type { t: Monotype::int() }),
+    "bool"      => Box::new(Type { t: Monotype::bool() }),
+    "float"     => Box::new(Type { t: Monotype::float() }),
+    "str"       => Box::new(Type { t: Monotype::string() }),
+    "()"        => Box::new(Type { t: Monotype::unit() }),
 };
 
 // ----------------------------------------------------------------------------
