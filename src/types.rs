@@ -109,7 +109,7 @@
  */
 use std::collections::HashMap;
 
-use crate::ast::{Binding, Expr, Type};
+use crate::ast::{Binding, Expr, Type, Lit};
 use crate::ast::Expr::*;
 use crate::types::Monotype::TypeFuncApplication;
 
@@ -175,6 +175,28 @@ impl Monotype {
             Self::TypeFuncApplication(_, _) => false
         }
     }
+
+    pub fn bool() -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunction::Bool), vec![])
+    }
+    pub fn int() -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunction::Int), vec![])
+    }
+    pub fn float() -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunction::Float), vec![])
+    }
+    pub fn string() -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunction::Str), vec![])
+    }
+    pub fn unit() -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunction::Unit), vec![])
+    }
+    pub fn func(vars : Vec<Monotype>) -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunction::Fn), vars)
+    }
+    pub fn list(vars : Vec<Monotype>) -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunction::List), vars)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -238,7 +260,7 @@ impl Substitution {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeContext {
     type_var_ctr : u32,
     pub variables : HashMap<String, Polytype>
@@ -372,9 +394,36 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             let s3 = unify(&t1.apply(&s2), &beta)?;
             Ok((s1.combine(s2).combine(s3.clone()), beta.apply(&s3)))
         },
-        Let(name, exp1, exp2) => Ok((Substitution::new(), Monotype::default())),
-        Literal(lit) => Ok((Substitution::new(), Monotype::default())),
-        IfElse(cond, exp1, exp2) => Ok((Substitution::new(), Monotype::default())),
+        Let(name, exp1, exp2) => {
+            let (s1, t1) = algo_w(context, exp1)?;
+            *context = context.apply(&s1);
+            context.add(name.clone(), context.generalise(&t1));
+            let (s2, t2) = algo_w(context, exp2)?;
+            Ok((s1.combine(s2), t2))
+        }
+        IfElse(cond, exp1, exp2) => {
+            let (s1, t1) = algo_w(context, cond)?;
+            let s2 = unify(&t1, &Monotype::bool())?;
+            *context = context.apply(&s1).apply(&s2);
+            let (s3, t3) = algo_w(context, exp1)?;
+            *context = context.apply(&s3);
+            let (s4, t4) = algo_w(context, exp2)?;
+            let s5 = unify(&t3.apply(&s4), &t4)?;
+            Ok((
+                s1.combine(s2).combine(s3).combine(s4.clone()).combine(s5.clone()),
+                t3.apply(&s4).apply(&s5)
+            ))
+        },
+        Literal(lit) => {
+            let typ = match lit.as_ref() {
+                Lit::Int(_) => Monotype::int(),
+                Lit::Bool(_) => Monotype::bool(),
+                Lit::Str(_) => Monotype::string(),
+                Lit::Float(_) => Monotype::float(),
+                Lit::Unit => Monotype::unit(),
+            };
+            Ok((Substitution::new(), typ))
+        }
     }
 }
 
@@ -530,56 +579,56 @@ mod tests {
     fn polytype_instantiate_mono_no_quantifiers() {
         let p = mono(int());
         let mut ctx = TypeContext::new();
-        let mut map = mappings(vec![]);
-        assert_eq!(p.instantiate(&mut ctx, &mut map), int());
+        let map = mappings(vec![]);
+        assert_eq!(p.instantiate(&mut ctx, Some(map)), int());
     }
 
     #[test]
     fn polytype_instantiate_mono_unmapped_var() {
         let p = mono(var("a"));
         let mut ctx = TypeContext::new();
-        let mut map = mappings(vec![]);
-        assert_eq!(p.instantiate(&mut ctx, &mut map), var("a"));
+        let map = mappings(vec![]);
+        assert_eq!(p.instantiate(&mut ctx, Some(map)), var("a"));
     }
 
     #[test]
     fn polytype_instantiate_mono_mapped_var() {
         let p = mono(var("a"));
         let mut ctx = TypeContext::new();
-        let mut map = mappings(vec![("a", int())]);
-        assert_eq!(p.instantiate(&mut ctx, &mut map), int());
+        let map = mappings(vec![("a", int())]);
+        assert_eq!(p.instantiate(&mut ctx, Some(map)), int());
     }
 
     #[test]
     fn polytype_instantiate_single_quantifier() {
         let p = forall("a", mono(fn_type(var("a"), int())));
         let mut ctx = TypeContext::new();
-        let mut map = mappings(vec![]);
-        assert_eq!(p.instantiate(&mut ctx, &mut map), fn_type(var("t0"), int()));
+        let map = mappings(vec![]);
+        assert_eq!(p.instantiate(&mut ctx, Some(map)), fn_type(var("t0"), int()));
     }
 
     #[test]
     fn polytype_instantiate_nested_quantifiers() {
         let p = forall("a", forall("b", mono(fn_type(var("a"), var("b")))));
         let mut ctx = TypeContext::new();
-        let mut map = mappings(vec![]);
-        assert_eq!(p.instantiate(&mut ctx, &mut map), fn_type(var("t0"), var("t1")));
+        let map = mappings(vec![]);
+        assert_eq!(p.instantiate(&mut ctx, Some(map)), fn_type(var("t0"), var("t1")));
     }
 
     #[test]
     fn polytype_instantiate_unused_quantifier() {
         let p = forall("a", mono(int()));
         let mut ctx = TypeContext::new();
-        let mut map = mappings(vec![]);
-        assert_eq!(p.instantiate(&mut ctx, &mut map), int());
+        let map = mappings(vec![]);
+        assert_eq!(p.instantiate(&mut ctx, Some(map)), int());
     }
 
     #[test]
     fn polytype_instantiate_repeated_quantifier() {
         let p = forall("a", mono(fn_type(var("a"), var("a"))));
         let mut ctx = TypeContext::new();
-        let mut map = mappings(vec![]);
-        assert_eq!(p.instantiate(&mut ctx, &mut map), fn_type(var("t0"), var("t0")));
+        let map = mappings(vec![]);
+        assert_eq!(p.instantiate(&mut ctx, Some(map)), fn_type(var("t0"), var("t0")));
     }
 
     #[test]
@@ -587,7 +636,7 @@ mod tests {
         let p = forall("a", mono(fn_type(var("a"), bool())));
         let mut ctx = TypeContext::new();
         let mut map = mappings(vec![]);
-        assert_eq!(p.instantiate(&mut ctx, &mut map), fn_type(var("t0"), bool()));
+        assert_eq!(p.instantiate(&mut ctx, Some(map)), fn_type(var("t0"), bool()));
     }
 
     #[test]

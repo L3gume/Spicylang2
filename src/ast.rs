@@ -66,8 +66,8 @@ pub struct Program {
 impl Program {
     // TODO: Result return type
     pub fn typecheck() {
-        let ctx = TypeContext::new();
-        algo_w(&ctx, &Box::new(Variable(String::new())));
+        let mut ctx = TypeContext::new();
+        let res = algo_w(&mut ctx, &Box::new(Variable(String::new())));
     }
 }
 
