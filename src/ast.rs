@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn float_literal() {
         let p = parse("3.14;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Float(3.14))))));
+        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Float(std::f32::consts::PI))))));
     }
 
     #[test]
