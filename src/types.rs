@@ -139,7 +139,7 @@ impl Monotype {
         match self.clone() {
             Self::TypeVariable(name) =>
                 match sub.variables.get(&name) {
-                    Some(monotype) => monotype.clone(),
+                    Some(monotype) => monotype.apply(sub),
                     _ => Self::TypeVariable(name),
                 },
             Self::TypeFuncApplication(typ_fn, types) =>
@@ -173,6 +173,10 @@ impl Monotype {
             },
             Self::TypeFuncApplication(_, _) => false
         }
+    }
+
+    pub fn var(name : String) -> Monotype {
+        Self::TypeVariable(name)
     }
 
     pub fn infer() -> Monotype {
@@ -223,7 +227,7 @@ impl Polytype {
     }
 
     pub fn instantiate(&self, ctx : &mut TypeContext, mappings : Option<HashMap<String, Monotype>>) -> Monotype {
-        let mut maps = mappings.unwrap_or(HashMap::new());
+        let mut maps = mappings.unwrap_or_default();
         match self {
             Self::Mono(mon) => mon.instantiate(&mut maps),
             Self::TypeQuantifier(quant, typ) => {
@@ -384,7 +388,7 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
         },
         Abstraction(bind, exp) => {
             let Binding(name, typp) = &**bind;
-            let beta_mon = type_to_typefn(&typp, context);
+            let beta_mon = type_to_typefn(typp, context);
             let beta_poly = Polytype::Mono(Box::new(beta_mon.clone()));
             context.add(name.clone(), beta_poly);
             let (sub1, t1) = algo_w(context, exp)?;
@@ -395,9 +399,10 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             let (s1, t1) = algo_w(context, exp1)?;
             *context = context.apply(&s1);
             let (s2, t2) = algo_w(context, exp2)?;
-            let beta = TypeFuncApplication(Box::new(TypeFunc::Fn), vec!(t2, Monotype::TypeVariable(context.new_typevar())));
+            let ret_var = Monotype::var(context.new_typevar());
+            let beta = TypeFuncApplication(Box::new(TypeFunc::Fn), vec!(t2, ret_var.clone()));
             let s3 = unify(&t1.apply(&s2), &beta)?;
-            Ok((s1.combine(s2).combine(s3.clone()), beta.apply(&s3)))
+            Ok((s1.combine(s2).combine(s3.clone()), ret_var.apply(&s3)))
         },
         Let(name, exp1, exp2) => {
             let (s1, t1) = algo_w(context, exp1)?;
@@ -432,16 +437,63 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
     }
 }
 
-// TODO: Second arg is expr
-pub fn algo_m(context : &TypeContext, expr : &Expr, typ : &TypeFunc) -> Substitution {
-    // TODO: Implement
+pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Result<Substitution, UnificationError> {
     match expr {
-        Variable(name) => Substitution::new(),
-        Abstraction(bind, exp) => Substitution::new(),
-        Application(exp1, exp2) => Substitution::new(),
-        Let(name, exp1, exp2) => Substitution::new(),
-        Literal(lit) => Substitution::new(),
-        IfElse(cond, exp1, exp2) => Substitution::new(),
+        Variable(name) => {
+            match context.get(name) {
+                Some(poly) => {
+                    Ok(unify(typ, &poly.instantiate(context, None))?)
+                }
+                _ => Err(UnificationError { message: format!("Undefined variable {}!", name) } )
+            }
+        },
+        Abstraction(bind, exp) => {
+            let beta1 = Monotype::var(context.new_typevar());
+            let beta2 = Monotype::var(context.new_typevar());
+            let s1 = unify(typ, &Monotype::func(vec![
+                    beta1.clone(), beta2.clone()
+                ]))?;
+
+            let Binding(name, typp) = &**bind;
+            let beta_mon = type_to_typefn(typp, context);
+            let s2 = unify(&beta_mon, &beta1.apply(&s1))?;
+
+            context.add(name.clone(), Polytype::Mono(Box::new(beta_mon.apply(&s2))));
+            let s3 = algo_m(context, exp, &beta2.apply(&s1).apply(&s2))?;
+            Ok(s1.combine(s2).combine(s3))
+        },
+        Application(exp1, exp2) => {
+            let beta = Monotype::var(context.new_typevar());
+            let s1 = algo_m(context, exp1, &Monotype::func(vec![beta.clone(), typ.clone()]))?;
+            let s2 = algo_m(&mut context.apply(&s1), exp2, &beta.apply(&s1))?;
+            Ok(s1.combine(s2))
+        },
+        Let(name, exp1, exp2) => {
+            let beta = Monotype::var(context.new_typevar());
+            let s1 = algo_m(context, exp1, &beta)?;
+            *context = context.apply(&s1);
+            context.add(name.clone(), context.generalise(&beta.apply(&s1)));
+            let s2 = algo_m(context, exp2, &typ.apply(&s1))?;
+            Ok(s1.combine(s2))
+        },
+        IfElse(cond, exp1, exp2) => {
+            let s1 = algo_m(context, cond, &Monotype::bool())?;
+            let t1 = typ.apply(&s1);
+            let s2 = algo_m(&mut context.apply(&s1), exp1, &t1)?;
+            let t2 = t1.apply(&s2);
+            let s3 = algo_m(&mut context.apply(&s1).apply(&s2), exp2, &t2)?;
+            Ok(s1.combine(s2).combine(s3))
+        },
+        Literal(lit) => {
+            let t = match lit.as_ref() {
+                Lit::Int(_) => Monotype::int(),
+                Lit::Bool(_) => Monotype::bool(),
+                Lit::Str(_) => Monotype::string(),
+                Lit::Float(_) => Monotype::float(),
+                Lit::Unit => Monotype::unit(),
+            };
+            unify(typ, &t)
+        },
     }
 }
 
@@ -542,7 +594,7 @@ mod tests {
         assert_eq!(result.variables.len(), 3);
         assert_eq!(result.variables.get("a"), Some(&int()));
         assert_eq!(result.variables.get("b"), Some(&bool()));
-        assert_eq!(result.variables.get("c"), Some(&var("a")));
+        assert_eq!(result.variables.get("c"), Some(&int()));
     }
 
     #[test]
@@ -762,5 +814,427 @@ mod tests {
     fn unify_fn_different_constructors() {
         let result = unify(&fn_type(int(), int()), &fn_type(int(), bool()));
         assert!(result.is_err());
+    }
+
+    // ---- Expr tree helpers ---- //
+
+    fn v(name: &str) -> Box<Expr> {
+        Box::new(Expr::Variable(name.to_string()))
+    }
+
+    fn lit(l: Lit) -> Box<Expr> {
+        Box::new(Expr::Literal(Box::new(l)))
+    }
+
+    fn lam_infer(name: &str, body: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Abstraction(
+            Box::new(Binding(name.to_string(), Box::new(Type { t: Monotype::infer() }))),
+            body,
+        ))
+    }
+
+    fn lam_annot(name: &str, annot: Monotype, body: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Abstraction(
+            Box::new(Binding(name.to_string(), Box::new(Type { t: annot }))),
+            body,
+        ))
+    }
+
+    fn app(e1: Box<Expr>, e2: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Application(e1, e2))
+    }
+
+    fn let_in(name: &str, e1: Box<Expr>, e2: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Let(name.to_string(), e1, e2))
+    }
+
+    fn if_else(cond: Box<Expr>, e1: Box<Expr>, e2: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::IfElse(cond, e1, e2))
+    }
+
+    fn ctx_with(pairs: Vec<(&str, Polytype)>) -> TypeContext {
+        TypeContext::make(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    // ===== algo_w tests =====
+
+    #[test]
+    fn w_literal_int() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &lit(Lit::Int(42)));
+        assert_eq!(result, Ok((Substitution::new(), int())));
+    }
+
+    #[test]
+    fn w_literal_bool() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &lit(Lit::Bool(true)));
+        assert_eq!(result, Ok((Substitution::new(), bool())));
+    }
+
+    #[test]
+    fn w_literal_str() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &lit(Lit::Str("hi".to_string())));
+        assert_eq!(result, Ok((Substitution::new(), Monotype::string())));
+    }
+
+    #[test]
+    fn w_literal_float() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &lit(Lit::Float(1.5)));
+        assert_eq!(result, Ok((Substitution::new(), Monotype::float())));
+    }
+
+    #[test]
+    fn w_literal_unit() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &lit(Lit::Unit));
+        assert_eq!(result, Ok((Substitution::new(), Monotype::unit())));
+    }
+
+    #[test]
+    fn w_var_in_context() {
+        let mut ctx = ctx_with(vec![("x", mono(int()))]);
+        let result = algo_w(&mut ctx, &v("x"));
+        assert_eq!(result, Ok((Substitution::new(), int())));
+    }
+
+    #[test]
+    fn w_var_poly() {
+        let mut ctx = ctx_with(vec![("id", forall("a", mono(fn_type(var("a"), var("a")))))]);
+        let result = algo_w(&mut ctx, &v("id"));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, fn_type(var("t0"), var("t0")));
+    }
+
+    #[test]
+    fn w_var_undefined() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &v("x"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn w_abstraction_identity() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &lam_infer("x", v("x")));
+        assert!(result.is_ok());
+        let (sub, typ) = result.unwrap();
+        assert_eq!(sub, Substitution::new());
+        assert_eq!(typ, fn_type(var("t0"), var("t0")));
+    }
+
+    #[test]
+    fn w_abstraction_annotated() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &lam_annot("x", int(), v("x")));
+        assert_eq!(result, Ok((Substitution::new(), fn_type(int(), int()))));
+    }
+
+    #[test]
+    fn w_abstraction_closure() {
+        let mut ctx = ctx_with(vec![("y", mono(bool()))]);
+        let result = algo_w(&mut ctx, &lam_infer("x", v("y")));
+        assert!(result.is_ok());
+        let (sub, typ) = result.unwrap();
+        assert_eq!(sub, Substitution::new());
+        assert_eq!(typ, fn_type(var("t0"), bool()));
+    }
+
+    #[test]
+    fn w_application_id_to_int() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &app(lam_infer("x", v("x")), lit(Lit::Int(5))));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, int());
+    }
+
+    #[test]
+    fn w_let_simple() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &let_in("x", lit(Lit::Int(5)), v("x")));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, int());
+    }
+
+    #[test]
+    fn w_let_polymorphic_id() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &let_in("id", lam_infer("x", v("x")), app(v("id"), lit(Lit::Int(5)))));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, int());
+    }
+
+    #[test]
+    fn w_if_else_int() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Int(2))));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, int());
+    }
+
+    #[test]
+    fn w_if_else_cond_not_bool() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &if_else(lit(Lit::Int(1)), lit(Lit::Int(2)), lit(Lit::Int(3))));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn w_if_else_branches_mismatch() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Bool(false))));
+        assert!(result.is_err());
+    }
+
+    // ===== algo_m tests =====
+
+    #[test]
+    fn m_literal_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &lit(Lit::Int(42)), &int());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_literal_mismatch() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &lit(Lit::Int(42)), &bool());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_literal_refines_var() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &lit(Lit::Int(42)), &var("a"));
+        assert_eq!(result, ok(vec![("a", int())]));
+    }
+
+    #[test]
+    fn m_var_matches() {
+        let mut ctx = ctx_with(vec![("x", mono(int()))]);
+        let result = algo_m(&mut ctx, &v("x"), &int());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_var_mismatch() {
+        let mut ctx = ctx_with(vec![("x", mono(int()))]);
+        let result = algo_m(&mut ctx, &v("x"), &bool());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_var_undefined() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &v("x"), &int());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_abstraction_matches_fn() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &lam_infer("x", v("x")), &fn_type(int(), int()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_abstraction_with_annot_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &lam_annot("x", int(), v("x")), &fn_type(int(), int()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_abstraction_annot_mismatches_expected() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &lam_annot("x", bool(), v("x")), &fn_type(int(), int()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_abstraction_expected_not_fn() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &lam_infer("x", v("x")), &int());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_abstraction_return_mismatch() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &lam_infer("x", lit(Lit::Int(5))), &fn_type(int(), bool()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_application_id_to_int() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &app(lam_infer("x", v("x")), lit(Lit::Int(5))), &int());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_application_wrong_result_type() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &app(lam_infer("x", v("x")), lit(Lit::Int(5))), &bool());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_let_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &let_in("x", lit(Lit::Int(5)), v("x")), &int());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_let_mismatch() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &let_in("x", lit(Lit::Int(5)), v("x")), &bool());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_let_polymorphic_id() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &let_in("id", lam_infer("x", v("x")), app(v("id"), lit(Lit::Int(5)))), &int());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_if_else_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Int(2))), &int());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_if_else_wrong_type() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Int(2))), &bool());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_if_else_cond_not_bool() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &if_else(lit(Lit::Int(1)), lit(Lit::Int(2)), lit(Lit::Int(3))), &int());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_if_else_branches_mismatch() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Bool(false))), &int());
+        assert!(result.is_err());
+    }
+
+    // ===== algo_w / algo_m agreement tests =====
+
+    #[test]
+    fn w_and_m_agree_literal_int() {
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &lit(Lit::Int(42))).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &lit(Lit::Int(42)), &resolved);
+        assert!(result_m.is_ok());
+    }
+
+    #[test]
+    fn w_and_m_agree_abstraction_identity() {
+        let expr = lam_infer("x", v("x"));
+
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &resolved);
+        assert!(result_m.is_ok());
+    }
+
+    #[test]
+    fn w_and_m_agree_annotated_abstraction() {
+        let expr = lam_annot("x", int(), v("x"));
+
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &resolved);
+        assert!(result_m.is_ok());
+    }
+
+    #[test]
+    fn w_and_m_agree_application() {
+        let expr = app(lam_infer("x", v("x")), lit(Lit::Int(5)));
+
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &resolved);
+        assert!(result_m.is_ok());
+    }
+
+    #[test]
+    fn w_and_m_agree_let() {
+        let expr = let_in("x", lit(Lit::Int(5)), v("x"));
+
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &resolved);
+        assert!(result_m.is_ok());
+    }
+
+    #[test]
+    fn w_and_m_agree_if_else() {
+        let expr = if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Int(2)));
+
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &resolved);
+        assert!(result_m.is_ok());
+    }
+
+    #[test]
+    fn w_and_m_agree_mismatch_rejected() {
+        let expr = lit(Lit::Int(42));
+
+        let mut ctx_w = TypeContext::new();
+        let (_sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        // typ_w is Int; pass Bool to algo_m — should fail
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &bool());
+        assert!(result_m.is_err());
+    }
+
+    #[test]
+    fn w_and_m_agree_polymorphic_let() {
+        let expr = let_in("id", lam_infer("x", v("x")), app(v("id"), lit(Lit::Int(5))));
+
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &resolved);
+        assert!(result_m.is_ok());
     }
 }
