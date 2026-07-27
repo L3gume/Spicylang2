@@ -107,7 +107,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Binding, Expr, Lit, Type};
-use crate::ast::Expr::*;
+use crate::ast::ENode::*;
 use crate::types::Monotype::TypeFuncApplication;
 
 
@@ -273,7 +273,7 @@ impl Substitution {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypeContext {
     type_var_ctr : u32,
     pub variables : HashMap<String, Polytype>
@@ -378,8 +378,11 @@ pub fn type_to_typefn(typ : &Type, context : &mut TypeContext) -> Monotype {
     }
 }
 
+/*
+* Bottom-Up algo
+*/
 pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution, Monotype), UnificationError> {
-    match expr {
+    match &*expr.e {
         Variable(name) => match context.get(name) {
             Some(poly) => {
                 Ok((Substitution::new(), poly.instantiate(context, None)))
@@ -437,8 +440,11 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
     }
 }
 
+/*
+* Top-Down algo
+*/
 pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Result<Substitution, UnificationError> {
-    match expr {
+    match &*expr.e {
         Variable(name) => {
             match context.get(name) {
                 Some(poly) => {
@@ -500,6 +506,7 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::ENode;
 
     fn var(name: &str) -> Monotype {
         Monotype::TypeVariable(name.to_string())
@@ -819,37 +826,37 @@ mod tests {
     // ---- Expr tree helpers ---- //
 
     fn v(name: &str) -> Box<Expr> {
-        Box::new(Expr::Variable(name.to_string()))
+        Box::new(Expr::from(ENode::Variable(name.to_string())))
     }
 
     fn lit(l: Lit) -> Box<Expr> {
-        Box::new(Expr::Literal(Box::new(l)))
+        Box::new(Expr::from(ENode::Literal(Box::new(l))))
     }
 
     fn lam_infer(name: &str, body: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::Abstraction(
+        Box::new(Expr::from(ENode::Abstraction(
             Box::new(Binding(name.to_string(), Box::new(Type { t: Monotype::infer() }))),
             body,
-        ))
+        )))
     }
 
     fn lam_annot(name: &str, annot: Monotype, body: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::Abstraction(
+        Box::new(Expr::from(ENode::Abstraction(
             Box::new(Binding(name.to_string(), Box::new(Type { t: annot }))),
             body,
-        ))
+        )))
     }
 
     fn app(e1: Box<Expr>, e2: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::Application(e1, e2))
+        Box::new(Expr::from(ENode::Application(e1, e2)))
     }
 
     fn let_in(name: &str, e1: Box<Expr>, e2: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::Let(name.to_string(), e1, e2))
+        Box::new(Expr::from(ENode::Let(name.to_string(), e1, e2)))
     }
 
     fn if_else(cond: Box<Expr>, e1: Box<Expr>, e2: Box<Expr>) -> Box<Expr> {
-        Box::new(Expr::IfElse(cond, e1, e2))
+        Box::new(Expr::from(ENode::IfElse(cond, e1, e2)))
     }
 
     fn ctx_with(pairs: Vec<(&str, Polytype)>) -> TypeContext {

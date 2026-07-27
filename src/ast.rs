@@ -1,4 +1,17 @@
-use crate::{ast::Expr::Variable, types::*, grammar};
+use crate::types::*;
+use crate::grammar;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pos {
+    start : (u32, u32),
+    end : (u32, u32)
+}
+
+impl Pos {
+    pub fn nil() -> Pos {
+        Pos { start : (0, 0), end : (0, 0) }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Lit {
@@ -17,15 +30,35 @@ pub struct Type {
 #[derive(Debug, PartialEq)]
 pub struct Binding(pub String, pub Box<Type>);
 
+// TODO: Wrap into struct that contains typing context & other metadata?
 #[derive(Debug, PartialEq)]
-pub enum Stmt {
+pub enum SNode {
     Decl(Box<Expr>, Box<Type>, Box<Expr>),  // let x [: Type] = e;
     Expr(Box<Expr>),                        // e; special case, not always ()
     Print(Box<Expr>),                       // print e;
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Expr {
+pub struct Stmt {
+    pub s : Box<SNode>,
+    pub ctx : TypeContext,
+    pub pos : Pos
+    // TODO
+}
+
+impl Stmt {
+    pub fn from(node : SNode) -> Stmt {
+        Stmt {
+            s : Box::new(node),
+            ctx : TypeContext::new(),
+            pos : Pos::nil()
+        }
+    }
+}
+
+// TODO: Wrap into struct that contains typing context & other metadata?
+#[derive(Debug, PartialEq)]
+pub enum ENode {
     Variable(String),
     Literal(Box<Lit>),
     Abstraction(Box<Binding>, Box<Expr>),
@@ -34,6 +67,24 @@ pub enum Expr {
     IfElse(Box<Expr>,Box<Expr>,Box<Expr>),
 }
 
+#[derive(Debug, PartialEq)]
+pub struct Expr {
+    pub e : Box<ENode>,
+    pub ctx : TypeContext,
+    pub pos : Pos
+}
+
+impl Expr {
+    pub fn from(node : ENode) -> Expr {
+        Expr {
+            e : Box::new(node),
+            ctx : TypeContext::new(),
+            pos : Pos::nil()
+        }
+    }
+}
+
+// TODO: These are expressions of type TypeFuncApp(OP, [e1, e2, Bool]) where OP : \e1 -> \e2 -> Bool
 #[derive(Debug)]
 pub enum CompOp {
     Eq,
@@ -43,6 +94,7 @@ pub enum CompOp {
     GreatEq,
 }
 
+// TODO: These are expressions of type TypeFuncApp(OP, [e1 : τ, e2 : τ, τ]) where OP : \e1 -> \e2 -> τ
 #[derive(Debug)]
 pub enum ArithOp {
     Plus,
@@ -54,7 +106,8 @@ pub enum ArithOp {
 
 #[derive(Debug)]
 pub struct Program {
-    pub stmts : Vec<Stmt>
+    pub stmts : Vec<Stmt>,
+    pub ctx : TypeContext
 }
 
 impl Program {
@@ -62,9 +115,10 @@ impl Program {
         grammar::ProgParser::new().parse(buf).map_err(|e| format!("{}", e))
     }
 
-    pub fn typecheck() {
-        let mut ctx = TypeContext::new();
-        let res = algo_w(&mut ctx, &Box::new(Variable(String::new())));
+    pub fn typecheck(prog : &mut Program) {
+        // TODO: for each statement, perform type inference, making sure to keep the program's
+        // typing context up-to-date
+        let res = algo_w(&mut prog.ctx, &Box::new(Expr::from(ENode::Variable(String::new()))));
     }
 }
 
@@ -90,55 +144,55 @@ mod tests {
     fn int_literal() {
         let p = parse("42;");
         assert_eq!(p.stmts.len(), 1);
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Int(42))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42)))))));
     }
 
     #[test]
     fn negative_int_literal() {
         let p = parse("-7;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Int(-7))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(-7)))))));
     }
 
     #[test]
     fn float_literal() {
         let p = parse("3.14;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Float(3.14))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Float(3.14)))))));
     }
 
     #[test]
     fn negative_float_literal() {
         let p = parse("-2.5;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Float(-2.5))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Float(-2.5)))))));
     }
 
     #[test]
     fn bool_true_literal() {
         let p = parse("true;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Bool(true))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(true)))))));
     }
 
     #[test]
     fn bool_false_literal() {
         let p = parse("false;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Bool(false))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(false)))))));
     }
 
     #[test]
     fn string_literal() {
         let p = parse(r#""hello";"#);
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Str("hello".to_string()))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("hello".to_string())))))));
     }
 
     #[test]
     fn empty_string_literal() {
         let p = parse(r#""";"#);
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Str("".to_string()))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("".to_string())))))));
     }
 
     #[test]
     fn unit_literal() {
         let p = parse("();");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Unit)))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Unit))))));
     }
 
     // ---- Variables ----
@@ -146,19 +200,19 @@ mod tests {
     #[test]
     fn simple_variable() {
         let p = parse("x;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Variable("x".to_string()))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Variable("x".to_string())))));
     }
 
     #[test]
     fn underscore_variable() {
         let p = parse("_foo;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Variable("_foo".to_string()))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Variable("_foo".to_string())))));
     }
 
     #[test]
     fn alphanumeric_variable() {
         let p = parse("x2y;");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Variable("x2y".to_string()))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Variable("x2y".to_string())))));
     }
 
     // ---- Application ----
@@ -167,11 +221,11 @@ mod tests {
     fn single_application() {
         let p = parse("f x;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Application(
-                Box::new(Expr::Variable("f".to_string())),
-                Box::new(Expr::Variable("x".to_string())),
-            )))
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Application(
+                Box::new(Expr::from(ENode::Variable("f".to_string()))),
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
         );
     }
 
@@ -179,14 +233,14 @@ mod tests {
     fn left_associative_application() {
         let p = parse("f x y;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Application(
-                Box::new(Expr::Application(
-                    Box::new(Expr::Variable("f".to_string())),
-                    Box::new(Expr::Variable("x".to_string())),
-                )),
-                Box::new(Expr::Variable("y".to_string())),
-            )))
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Application(
+                Box::new(Expr::from(ENode::Application(
+                    Box::new(Expr::from(ENode::Variable("f".to_string()))),
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                ))),
+                Box::new(Expr::from(ENode::Variable("y".to_string()))),
+            ))))
         );
     }
 
@@ -194,11 +248,11 @@ mod tests {
     fn application_with_literal_arg() {
         let p = parse("f 42;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Application(
-                Box::new(Expr::Variable("f".to_string())),
-                Box::new(Expr::Literal(Box::new(Lit::Int(42)))),
-            )))
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Application(
+                Box::new(Expr::from(ENode::Variable("f".to_string()))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))),
+            ))))
         );
     }
 
@@ -206,14 +260,14 @@ mod tests {
     fn application_with_parenthesized_expr() {
         let p = parse("f (g x);");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Application(
-                Box::new(Expr::Variable("f".to_string())),
-                Box::new(Expr::Application(
-                    Box::new(Expr::Variable("g".to_string())),
-                    Box::new(Expr::Variable("x".to_string())),
-                )),
-            )))
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Application(
+                Box::new(Expr::from(ENode::Variable("f".to_string()))),
+                Box::new(Expr::from(ENode::Application(
+                    Box::new(Expr::from(ENode::Variable("g".to_string()))),
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                ))),
+            ))))
         );
     }
 
@@ -223,11 +277,11 @@ mod tests {
     fn lambda_without_type_annotation() {
         let p = parse("\\x => x;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Abstraction(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Abstraction(
                 Box::new(Binding("x".to_string(), mono(Monotype::infer()))),
-                Box::new(Expr::Variable("x".to_string())),
-            )))
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
         );
     }
 
@@ -235,11 +289,11 @@ mod tests {
     fn lambda_with_type_annotation() {
         let p = parse("\\(x : int) => x;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Abstraction(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Abstraction(
                 Box::new(Binding("x".to_string(), mono(Monotype::int()))),
-                Box::new(Expr::Variable("x".to_string())),
-            )))
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
         );
     }
 
@@ -247,14 +301,14 @@ mod tests {
     fn nested_lambda() {
         let p = parse("\\x => \\y => x;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Abstraction(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Abstraction(
                 Box::new(Binding("x".to_string(), mono(Monotype::infer()))),
-                Box::new(Expr::Abstraction(
+                Box::new(Expr::from(ENode::Abstraction(
                     Box::new(Binding("y".to_string(), mono(Monotype::infer()))),
-                    Box::new(Expr::Variable("x".to_string())),
-                )),
-            )))
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                ))),
+            ))))
         );
     }
 
@@ -262,11 +316,11 @@ mod tests {
     fn lambda_with_function_type_annotation() {
         let p = parse("\\(f : int => bool) => f;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Abstraction(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Abstraction(
                 Box::new(Binding("f".to_string(), mono(Monotype::func(vec![Monotype::int(), Monotype::bool()])))),
-                Box::new(Expr::Variable("f".to_string())),
-            )))
+                Box::new(Expr::from(ENode::Variable("f".to_string()))),
+            ))))
         );
     }
 
@@ -276,12 +330,12 @@ mod tests {
     fn let_in() {
         let p = parse("let x = 1 in x;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Let(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Let(
                 "x".to_string(),
-                Box::new(Expr::Literal(Box::new(Lit::Int(1)))),
-                Box::new(Expr::Variable("x".to_string())),
-            )))
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
         );
     }
 
@@ -289,16 +343,16 @@ mod tests {
     fn let_in_with_complex_body() {
         let p = parse("let x = 1 in let y = 2 in x;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Let(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Let(
                 "x".to_string(),
-                Box::new(Expr::Literal(Box::new(Lit::Int(1)))),
-                Box::new(Expr::Let(
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+                Box::new(Expr::from(ENode::Let(
                     "y".to_string(),
-                    Box::new(Expr::Literal(Box::new(Lit::Int(2)))),
-                    Box::new(Expr::Variable("x".to_string())),
-                )),
-            )))
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(2))))),
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                ))),
+            ))))
         );
     }
 
@@ -308,12 +362,12 @@ mod tests {
     fn if_else() {
         let p = parse("if true then 1 else 2;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::IfElse(
-                Box::new(Expr::Literal(Box::new(Lit::Bool(true)))),
-                Box::new(Expr::Literal(Box::new(Lit::Int(1)))),
-                Box::new(Expr::Literal(Box::new(Lit::Int(2)))),
-            )))
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::IfElse(
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(true))))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(2))))),
+            ))))
         );
     }
 
@@ -321,12 +375,12 @@ mod tests {
     fn if_else_with_variable_condition() {
         let p = parse("if x then y else z;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::IfElse(
-                Box::new(Expr::Variable("x".to_string())),
-                Box::new(Expr::Variable("y".to_string())),
-                Box::new(Expr::Variable("z".to_string())),
-            )))
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::IfElse(
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                Box::new(Expr::from(ENode::Variable("y".to_string()))),
+                Box::new(Expr::from(ENode::Variable("z".to_string()))),
+            ))))
         );
     }
 
@@ -334,16 +388,16 @@ mod tests {
     fn nested_if_else() {
         let p = parse("if true then if false then 1 else 2 else 3;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::IfElse(
-                Box::new(Expr::Literal(Box::new(Lit::Bool(true)))),
-                Box::new(Expr::IfElse(
-                    Box::new(Expr::Literal(Box::new(Lit::Bool(false)))),
-                    Box::new(Expr::Literal(Box::new(Lit::Int(1)))),
-                    Box::new(Expr::Literal(Box::new(Lit::Int(2)))),
-                )),
-                Box::new(Expr::Literal(Box::new(Lit::Int(3)))),
-            )))
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::IfElse(
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(true))))),
+                Box::new(Expr::from(ENode::IfElse(
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(false))))),
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(2))))),
+                ))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(3))))),
+            ))))
         );
     }
 
@@ -352,18 +406,18 @@ mod tests {
     #[test]
     fn parenthesized_variable() {
         let p = parse("(x);");
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Variable("x".to_string()))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Variable("x".to_string())))));
     }
 
     #[test]
     fn parenthesized_application() {
         let p = parse("(f x);");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Application(
-                Box::new(Expr::Variable("f".to_string())),
-                Box::new(Expr::Variable("x".to_string())),
-            )))
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Application(
+                Box::new(Expr::from(ENode::Variable("f".to_string()))),
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
         );
     }
 
@@ -373,11 +427,11 @@ mod tests {
     fn let_decl_without_type() {
         let p = parse("let x = 42;");
         assert_eq!(
-            first(&p),
-            &Stmt::Decl(
-                Box::new(Expr::Variable("x".to_string())),
+            &*first(&p).s,
+            &SNode::Decl(
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
                 mono(Monotype::infer()),
-                Box::new(Expr::Literal(Box::new(Lit::Int(42)))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))),
             )
         );
     }
@@ -386,11 +440,11 @@ mod tests {
     fn let_decl_with_type() {
         let p = parse("let x : int = 42;");
         assert_eq!(
-            first(&p),
-            &Stmt::Decl(
-                Box::new(Expr::Variable("x".to_string())),
+            &*first(&p).s,
+            &SNode::Decl(
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
                 mono(Monotype::int()),
-                Box::new(Expr::Literal(Box::new(Lit::Int(42)))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))),
             )
         );
     }
@@ -399,14 +453,14 @@ mod tests {
     fn let_decl_with_function_type() {
         let p = parse("let f : int => int = \\x => x;");
         assert_eq!(
-            first(&p),
-            &Stmt::Decl(
-                Box::new(Expr::Variable("f".to_string())),
+            &*first(&p).s,
+            &SNode::Decl(
+                Box::new(Expr::from(ENode::Variable("f".to_string()))),
                 mono(Monotype::func(vec![Monotype::int(), Monotype::int()])),
-                Box::new(Expr::Abstraction(
+                Box::new(Expr::from(ENode::Abstraction(
                     Box::new(Binding("x".to_string(), mono(Monotype::infer()))),
-                    Box::new(Expr::Variable("x".to_string())),
-                )),
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                ))),
             )
         );
     }
@@ -415,11 +469,11 @@ mod tests {
     fn let_decl_with_bool_type() {
         let p = parse("let b : bool = true;");
         assert_eq!(
-            first(&p),
-            &Stmt::Decl(
-                Box::new(Expr::Variable("b".to_string())),
+            &*first(&p).s,
+            &SNode::Decl(
+                Box::new(Expr::from(ENode::Variable("b".to_string()))),
                 mono(Monotype::bool()),
-                Box::new(Expr::Literal(Box::new(Lit::Bool(true)))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(true))))),
             )
         );
     }
@@ -428,8 +482,8 @@ mod tests {
     fn print_statement() {
         let p = parse("print x;");
         assert_eq!(
-            first(&p),
-            &Stmt::Print(Box::new(Expr::Variable("x".to_string())))
+            &*first(&p).s,
+            &SNode::Print(Box::new(Expr::from(ENode::Variable("x".to_string()))))
         );
     }
 
@@ -437,8 +491,8 @@ mod tests {
     fn print_literal() {
         let p = parse("print 42;");
         assert_eq!(
-            first(&p),
-            &Stmt::Print(Box::new(Expr::Literal(Box::new(Lit::Int(42)))))
+            &*first(&p).s,
+            &SNode::Print(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))))
         );
     }
 
@@ -447,8 +501,8 @@ mod tests {
     #[test]
     fn simple_type_int() {
         let p = parse("let x : int = 0;");
-        match first(&p) {
-            Stmt::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::int()),
+        match &*first(&p).s {
+            SNode::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::int()),
             other => panic!("expected Decl, got {:?}", other),
         }
     }
@@ -456,8 +510,8 @@ mod tests {
     #[test]
     fn simple_type_bool() {
         let p = parse("let x : bool = true;");
-        match first(&p) {
-            Stmt::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::bool()),
+        match &*first(&p).s {
+            SNode::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::bool()),
             other => panic!("expected Decl, got {:?}", other),
         }
     }
@@ -465,8 +519,8 @@ mod tests {
     #[test]
     fn simple_type_float() {
         let p = parse("let x : float = 1.0;");
-        match first(&p) {
-            Stmt::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::float()),
+        match &*first(&p).s {
+            SNode::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::float()),
             other => panic!("expected Decl, got {:?}", other),
         }
     }
@@ -474,8 +528,8 @@ mod tests {
     #[test]
     fn simple_type_str() {
         let p = parse(r#"let x : str = "hi";"#);
-        match first(&p) {
-            Stmt::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::string()),
+        match &*first(&p).s {
+            SNode::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::string()),
             other => panic!("expected Decl, got {:?}", other),
         }
     }
@@ -483,8 +537,8 @@ mod tests {
     #[test]
     fn simple_type_unit() {
         let p = parse("let x : () = ();");
-        match first(&p) {
-            Stmt::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::unit()),
+        match &*first(&p).s {
+            SNode::Decl(_, typ, _) => assert_eq!(typ.t, Monotype::unit()),
             other => panic!("expected Decl, got {:?}", other),
         }
     }
@@ -492,8 +546,8 @@ mod tests {
     #[test]
     fn function_type() {
         let p = parse("let f : int => bool = true;");
-        match first(&p) {
-            Stmt::Decl(_, typ, _) => {
+        match &*first(&p).s {
+            SNode::Decl(_, typ, _) => {
                 assert_eq!(typ.t, Monotype::func(vec![Monotype::int(), Monotype::bool()]))
             }
             other => panic!("expected Decl, got {:?}", other),
@@ -503,8 +557,8 @@ mod tests {
     #[test]
     fn nested_function_type() {
         let p = parse("let f : int => bool => str = true;");
-        match first(&p) {
-            Stmt::Decl(_, typ, _) => {
+        match &*first(&p).s {
+            SNode::Decl(_, typ, _) => {
                 assert_eq!(
                     typ.t,
                     Monotype::func(vec![
@@ -529,19 +583,19 @@ mod tests {
     fn single_statement_no_semicolon() {
         let p = parse("42");
         assert_eq!(p.stmts.len(), 1);
-        assert_eq!(first(&p), &Stmt::Expr(Box::new(Expr::Literal(Box::new(Lit::Int(42))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42)))))));
     }
 
     #[test]
     fn multiple_statements() {
         let p = parse("let x = 1; let y = 2;");
         assert_eq!(p.stmts.len(), 2);
-        match &p.stmts[0] {
-            Stmt::Decl(name, _, _) => assert_eq!(**name, Expr::Variable("x".to_string())),
+        match &*p.stmts[0].s {
+            SNode::Decl(name, _, _) => assert_eq!(**name, Expr::from(ENode::Variable("x".to_string()))),
             other => panic!("expected Decl, got {:?}", other),
         }
-        match &p.stmts[1] {
-            Stmt::Decl(name, _, _) => assert_eq!(**name, Expr::Variable("y".to_string())),
+        match &*p.stmts[1].s {
+            SNode::Decl(name, _, _) => assert_eq!(**name, Expr::from(ENode::Variable("y".to_string()))),
             other => panic!("expected Decl, got {:?}", other),
         }
     }
@@ -550,9 +604,9 @@ mod tests {
     fn mixed_statement_types() {
         let p = parse("let x = 1; print x; x;");
         assert_eq!(p.stmts.len(), 3);
-        assert!(matches!(first(&p), Stmt::Decl(..)));
-        assert!(matches!(&p.stmts[1], Stmt::Print(..)));
-        assert!(matches!(&p.stmts[2], Stmt::Expr(..)));
+        assert!(matches!(&*first(&p).s, SNode::Decl(..)));
+        assert!(matches!(&*p.stmts[1].s, SNode::Print(..)));
+        assert!(matches!(&*p.stmts[2].s, SNode::Expr(..)));
     }
 
     #[test]
@@ -567,22 +621,22 @@ mod tests {
     fn complex_nested_expression() {
         let p = parse("if true then let x = \\(a : int) => a in x 1 else 0;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::IfElse(
-                Box::new(Expr::Literal(Box::new(Lit::Bool(true)))),
-                Box::new(Expr::Let(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::IfElse(
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(true))))),
+                Box::new(Expr::from(ENode::Let(
                     "x".to_string(),
-                    Box::new(Expr::Abstraction(
+                    Box::new(Expr::from(ENode::Abstraction(
                         Box::new(Binding("a".to_string(), mono(Monotype::int()))),
-                        Box::new(Expr::Variable("a".to_string())),
-                    )),
-                    Box::new(Expr::Application(
-                        Box::new(Expr::Variable("x".to_string())),
-                        Box::new(Expr::Literal(Box::new(Lit::Int(1)))),
-                    )),
-                )),
-                Box::new(Expr::Literal(Box::new(Lit::Int(0)))),
-            )))
+                        Box::new(Expr::from(ENode::Variable("a".to_string()))),
+                    ))),
+                    Box::new(Expr::from(ENode::Application(
+                        Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                        Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+                    ))),
+                ))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(0))))),
+            ))))
         );
     }
 
@@ -590,22 +644,22 @@ mod tests {
     fn identity_function_applied() {
         let p = parse("\\x => x y;");
         assert_eq!(
-            first(&p),
-            &Stmt::Expr(Box::new(Expr::Abstraction(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Abstraction(
                 Box::new(Binding("x".to_string(), mono(Monotype::infer()))),
-                Box::new(Expr::Application(
-                    Box::new(Expr::Variable("x".to_string())),
-                    Box::new(Expr::Variable("y".to_string())),
-                )),
-            )))
+                Box::new(Expr::from(ENode::Application(
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                    Box::new(Expr::from(ENode::Variable("y".to_string()))),
+                ))),
+            ))))
         );
     }
 
     #[test]
     fn multi_arg_function_type() {
         let p = parse("let f : int => bool => str = 0;");
-        match first(&p) {
-            Stmt::Decl(_, typ, _) => {
+        match &*first(&p).s {
+            SNode::Decl(_, typ, _) => {
                 assert_eq!(
                     typ.t,
                     Monotype::func(vec![
