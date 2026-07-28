@@ -106,8 +106,9 @@
  */
 use std::collections::HashMap;
 
-use crate::ast::{Binding, Expr, Lit, Type};
-use crate::ast::ENode::*;
+use crate::ast::{Binding, Expr, Lit, Stmt, Type};
+use crate::ast::ENode;
+use crate::ast::SNode;
 use crate::types::Monotype::TypeFuncApplication;
 
 
@@ -296,6 +297,10 @@ impl TypeContext {
         self.variables.insert(name, typ);
     }
 
+    pub fn remove(&mut self, name : &str) {
+        self.variables.remove(name);
+    }
+
     pub fn apply(&self, sub : &Substitution) -> TypeContext {
         TypeContext { type_var_ctr: self.type_var_ctr, variables: self.variables.iter().map(|(k, t)| (k.clone(), t.apply(sub))).collect() }
     }
@@ -365,6 +370,12 @@ pub struct UnificationError {
     // TODO: location information?
 }
 
+impl std::fmt::Display for UnificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
 
 fn diff<T>(v1 : Vec<T>, v2 : Vec<T>) -> Vec<T> where T : PartialEq + Clone {
     v1.into_iter().filter(|x| !v2.contains(x)).collect()
@@ -383,22 +394,27 @@ pub fn type_to_typefn(typ : &Type, context : &mut TypeContext) -> Monotype {
 */
 pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution, Monotype), UnificationError> {
     match &*expr.e {
-        Variable(name) => match context.get(name) {
+        ENode::Variable(name) => match context.get(name) {
             Some(poly) => {
                 Ok((Substitution::new(), poly.instantiate(context, None)))
             }
             _ => Err(UnificationError { message: format!("Undefined variable {}!", name) } )
         },
-        Abstraction(bind, exp) => {
+        ENode::Abstraction(bind, exp) => {
             let Binding(name, typp) = &**bind;
             let beta_mon = type_to_typefn(typp, context);
             let beta_poly = Polytype::Mono(Box::new(beta_mon.clone()));
+            let old_binding = context.get(name);
             context.add(name.clone(), beta_poly);
             let (sub1, t1) = algo_w(context, exp)?;
+            match old_binding {
+                Some(poly) => context.add(name.clone(), poly),
+                None => context.remove(name),
+            }
             let beta = Monotype::TypeFuncApplication(Box::new(TypeFunc::Fn), vec!(beta_mon, t1)).apply(&sub1);
             Ok((sub1, beta))
         },
-        Application(exp1, exp2) => {
+        ENode::Application(exp1, exp2) => {
             let (s1, t1) = algo_w(context, exp1)?;
             *context = context.apply(&s1);
             let (s2, t2) = algo_w(context, exp2)?;
@@ -407,14 +423,14 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             let s3 = unify(&t1.apply(&s2), &beta)?;
             Ok((s1.combine(s2).combine(s3.clone()), ret_var.apply(&s3)))
         },
-        Let(name, exp1, exp2) => {
+        ENode::Let(name, exp1, exp2) => {
             let (s1, t1) = algo_w(context, exp1)?;
             *context = context.apply(&s1);
             context.add(name.clone(), context.generalise(&t1));
             let (s2, t2) = algo_w(context, exp2)?;
             Ok((s1.combine(s2), t2))
         }
-        IfElse(cond, exp1, exp2) => {
+        ENode::IfElse(cond, exp1, exp2) => {
             let (s1, t1) = algo_w(context, cond)?;
             let s2 = unify(&t1, &Monotype::bool())?;
             *context = context.apply(&s1).apply(&s2);
@@ -427,7 +443,65 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                 t3.apply(&s4).apply(&s5)
             ))
         },
-        Literal(lit) => {
+        ENode::Block(stmts, exp) => {
+            let mut combined = Substitution::new();
+            for s in stmts {
+                match &*s.s {
+                    SNode::Decl(e1, t1, e2) => {
+                        let var_name = match &*e1.e {
+                            ENode::Variable(name) => name.clone(),
+                            _ => return Err(UnificationError { message: "Expected a variable name in declaration".to_string() }),
+                        };
+                        let binding_type = type_to_typefn(t1, context);
+                        let (s1, inferred_type) = algo_w(context, e2)?;
+                        *context = context.apply(&s1);
+                        combined = combined.combine(s1);
+                        let s2 = unify(&binding_type.apply(&combined), &inferred_type)?;
+                        *context = context.apply(&s2);
+                        combined = combined.combine(s2);
+                        let resolved = binding_type.apply(&combined);
+                        context.add(var_name, context.generalise(&resolved));
+                    },
+                    SNode::Expr(e1) => {
+                        let (s1, _) = algo_w(context, e1)?;
+                        *context = context.apply(&s1);
+                        combined = combined.combine(s1);
+                    },
+                    SNode::Print(e1) => {
+                        let (s1, t1) = algo_w(context, e1)?;
+                        *context = context.apply(&s1);
+                        combined = combined.combine(s1);
+                        let s2 = unify(&t1, &Monotype::string())?;
+                        *context = context.apply(&s2);
+                        combined = combined.combine(s2);
+                    },
+                }
+            }
+            let (s_exp, t_exp) = algo_w(context, exp)?;
+            combined = combined.combine(s_exp);
+            Ok((combined, t_exp))
+        },
+        ENode::List(exps) => {
+            if exps.is_empty() {
+                let tv = Monotype::var(context.new_typevar());
+                Ok((Substitution::new(), Monotype::list(vec![tv])))
+            } else {
+                let (s0, t0) = algo_w(context, &exps[0])?;
+                *context = context.apply(&s0);
+                let mut combined = s0;
+                let mut elem_type = t0;
+                for e in &exps[1..] {
+                    let (s_i, t_i) = algo_w(context, e)?;
+                    *context = context.apply(&s_i);
+                    combined = combined.combine(s_i);
+                    let s_u = unify(&elem_type, &t_i)?;
+                    combined = combined.combine(s_u.clone());
+                    elem_type = elem_type.apply(&s_u);
+                }
+                Ok((combined, Monotype::list(vec![elem_type])))
+            }
+        },
+        ENode::Literal(lit) => {
             let typ = match lit.as_ref() {
                 Lit::Int(_) => Monotype::int(),
                 Lit::Bool(_) => Monotype::bool(),
@@ -445,7 +519,7 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
 */
 pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Result<Substitution, UnificationError> {
     match &*expr.e {
-        Variable(name) => {
+        ENode::Variable(name) => {
             match context.get(name) {
                 Some(poly) => {
                     Ok(unify(typ, &poly.instantiate(context, None))?)
@@ -453,7 +527,7 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
                 _ => Err(UnificationError { message: format!("Undefined variable {}!", name) } )
             }
         },
-        Abstraction(bind, exp) => {
+        ENode::Abstraction(bind, exp) => {
             let beta1 = Monotype::var(context.new_typevar());
             let beta2 = Monotype::var(context.new_typevar());
             let s1 = unify(typ, &Monotype::func(vec![
@@ -464,17 +538,22 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
             let beta_mon = type_to_typefn(typp, context);
             let s2 = unify(&beta_mon, &beta1.apply(&s1))?;
 
+            let old_binding = context.get(name);
             context.add(name.clone(), Polytype::Mono(Box::new(beta_mon.apply(&s2))));
             let s3 = algo_m(context, exp, &beta2.apply(&s1).apply(&s2))?;
+            match old_binding {
+                Some(poly) => context.add(name.clone(), poly),
+                None => context.remove(name),
+            }
             Ok(s1.combine(s2).combine(s3))
         },
-        Application(exp1, exp2) => {
+        ENode::Application(exp1, exp2) => {
             let beta = Monotype::var(context.new_typevar());
             let s1 = algo_m(context, exp1, &Monotype::func(vec![beta.clone(), typ.clone()]))?;
             let s2 = algo_m(&mut context.apply(&s1), exp2, &beta.apply(&s1))?;
             Ok(s1.combine(s2))
         },
-        Let(name, exp1, exp2) => {
+        ENode::Let(name, exp1, exp2) => {
             let beta = Monotype::var(context.new_typevar());
             let s1 = algo_m(context, exp1, &beta)?;
             *context = context.apply(&s1);
@@ -482,7 +561,7 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
             let s2 = algo_m(context, exp2, &typ.apply(&s1))?;
             Ok(s1.combine(s2))
         },
-        IfElse(cond, exp1, exp2) => {
+        ENode::IfElse(cond, exp1, exp2) => {
             let s1 = algo_m(context, cond, &Monotype::bool())?;
             let t1 = typ.apply(&s1);
             let s2 = algo_m(&mut context.apply(&s1), exp1, &t1)?;
@@ -490,7 +569,63 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
             let s3 = algo_m(&mut context.apply(&s1).apply(&s2), exp2, &t2)?;
             Ok(s1.combine(s2).combine(s3))
         },
-        Literal(lit) => {
+        ENode::Block(stmts, exp) => {
+            let mut combined = Substitution::new();
+            for s in stmts {
+                match &*s.s {
+                    SNode::Decl(e1, t1, e2) => {
+                        let var_name = match &*e1.e {
+                            ENode::Variable(name) => name.clone(),
+                            _ => return Err(UnificationError { message: "Expected a variable name in declaration".to_string() }),
+                        };
+                        let binding_type = type_to_typefn(t1, context);
+                        let beta = Monotype::var(context.new_typevar());
+                        let s1 = algo_m(context, e2, &beta)?;
+                        *context = context.apply(&s1);
+                        combined = combined.combine(s1.clone());
+                        let s2 = unify(&binding_type.apply(&combined), &beta.apply(&s1))?;
+                        *context = context.apply(&s2);
+                        combined = combined.combine(s2);
+                        let resolved = binding_type.apply(&combined);
+                        context.add(var_name, context.generalise(&resolved));
+                    },
+                    SNode::Expr(e1) => {
+                        let beta = Monotype::var(context.new_typevar());
+                        let s1 = algo_m(context, e1, &beta)?;
+                        *context = context.apply(&s1);
+                        combined = combined.combine(s1);
+                    },
+                    SNode::Print(e1) => {
+                        let s1 = algo_m(context, e1, &Monotype::string())?;
+                        *context = context.apply(&s1);
+                        combined = combined.combine(s1);
+                    },
+                }
+            }
+            let s_final = algo_m(context, exp, &typ.apply(&combined))?;
+            combined = combined.combine(s_final);
+            Ok(combined)
+        },
+        ENode::List(exps) => {
+            if exps.is_empty() {
+                let tv = Monotype::var(context.new_typevar());
+                unify(&Monotype::list(vec![tv]), typ)
+            } else {
+                let beta = Monotype::var(context.new_typevar());
+                let s0 = unify(&Monotype::list(vec![beta.clone()]), typ)?;
+                *context = context.apply(&s0);
+                let mut combined = s0;
+                let mut elem_type = beta.apply(&combined);
+                for e in exps {
+                    let s_i = algo_m(context, e, &elem_type)?;
+                    *context = context.apply(&s_i);
+                    combined = combined.combine(s_i.clone());
+                    elem_type = elem_type.apply(&s_i);
+                }
+                Ok(combined)
+            }
+        },
+        ENode::Literal(lit) => {
             let t = match lit.as_ref() {
                 Lit::Int(_) => Monotype::int(),
                 Lit::Bool(_) => Monotype::bool(),
@@ -795,7 +930,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
+// Block expression    #[test]
     fn unify_infinite_nested() {
         let result = unify(&var("a"), &fn_type(int(), var("a")));
         assert!(result.is_err());
@@ -857,6 +992,10 @@ mod tests {
 
     fn if_else(cond: Box<Expr>, e1: Box<Expr>, e2: Box<Expr>) -> Box<Expr> {
         Box::new(Expr::from(ENode::IfElse(cond, e1, e2)))
+    }
+
+    fn list(exps: Vec<Box<Expr>>) -> Box<Expr> {
+        Box::new(Expr::from(ENode::List(exps.into_iter().map(|b| *b).collect())))
     }
 
     fn ctx_with(pairs: Vec<(&str, Polytype)>) -> TypeContext {
@@ -921,6 +1060,61 @@ mod tests {
         let mut ctx = TypeContext::new();
         let result = algo_w(&mut ctx, &v("x"));
         assert!(result.is_err());
+    }
+
+    // ---- W: list expressions ----
+
+    #[test]
+    fn w_list_empty() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &list(vec![]));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert!(matches!(typ, Monotype::TypeFuncApplication(f, _) if *f == TypeFunc::List));
+    }
+
+    #[test]
+    fn w_list_int() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &list(vec![lit(Lit::Int(1)), lit(Lit::Int(2))]));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, Monotype::list(vec![Monotype::int()]));
+    }
+
+    #[test]
+    fn w_list_bool() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &list(vec![lit(Lit::Bool(true)), lit(Lit::Bool(false))]));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, Monotype::list(vec![Monotype::bool()]));
+    }
+
+    #[test]
+    fn w_list_mixed_type_error() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &list(vec![lit(Lit::Int(1)), lit(Lit::Bool(true))]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn w_list_single() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &list(vec![lit(Lit::Float(3.14))]));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, Monotype::list(vec![Monotype::float()]));
+    }
+
+    #[test]
+    fn w_list_with_variable() {
+        let mut ctx = TypeContext::new();
+        ctx.add("x".to_string(), Polytype::Mono(Box::new(Monotype::int())));
+        let result = algo_w(&mut ctx, &list(vec![v("x"), v("x")]));
+        assert!(result.is_ok());
+        let (_sub, typ) = result.unwrap();
+        assert_eq!(typ, Monotype::list(vec![Monotype::int()]));
     }
 
     #[test]
@@ -1021,6 +1215,84 @@ mod tests {
         let mut ctx = TypeContext::new();
         let result = algo_m(&mut ctx, &lit(Lit::Int(42)), &var("a"));
         assert_eq!(result, ok(vec![("a", int())]));
+    }
+
+    // ---- M: list expressions ----
+
+    #[test]
+    fn m_list_empty_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &list(vec![]), &Monotype::list(vec![Monotype::int()]));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_list_empty_refines_var() {
+        let mut ctx = TypeContext::new();
+        let tv = Monotype::var("a".to_string());
+        let result = algo_m(&mut ctx, &list(vec![]), &tv);
+        assert!(result.is_ok());
+        let sub = result.unwrap();
+        let resolved = tv.apply(&sub);
+        assert!(matches!(resolved, Monotype::TypeFuncApplication(f, _) if *f == TypeFunc::List));
+    }
+
+    #[test]
+    fn m_list_int_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(
+            &mut ctx,
+            &list(vec![lit(Lit::Int(1)), lit(Lit::Int(2))]),
+            &Monotype::list(vec![Monotype::int()]),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_list_int_mismatch() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(
+            &mut ctx,
+            &list(vec![lit(Lit::Int(1)), lit(Lit::Bool(true))]),
+            &Monotype::list(vec![Monotype::int()]),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_list_wrong_outer_type() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &list(vec![]), &Monotype::int());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_list_bool_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(
+            &mut ctx,
+            &list(vec![lit(Lit::Bool(true)), lit(Lit::Bool(false))]),
+            &Monotype::list(vec![Monotype::bool()]),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_list_refines_elem_var() {
+        let mut ctx = TypeContext::new();
+        let tv = Monotype::var("a".to_string());
+        let list_tv = Monotype::list(vec![tv.clone()]);
+        let result = algo_m(&mut ctx, &list(vec![lit(Lit::Int(42))]), &list_tv);
+        assert!(result.is_ok());
+        let sub = result.unwrap();
+        assert_eq!(tv.apply(&sub), Monotype::int());
+    }
+
+    #[test]
+    fn m_list_empty_wrong_outer_type() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &list(vec![]), &Monotype::bool());
+        assert!(result.is_err());
     }
 
     #[test]

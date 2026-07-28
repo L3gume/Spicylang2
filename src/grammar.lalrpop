@@ -15,11 +15,22 @@ grammar;
 pub Prog: Box<Program> = <ss:SemiCol<Stmt>> => Box::new(Program { stmts : ss, ctx : TypeContext::new() });
 
 pub Stmt: Stmt = {
+    BlockStmt   => <>,
+    <e:Expr>    => Stmt::from(SNode::Expr(e)),
+};
+
+// Statements allowed inside a block — no bare Expr variant to keep LR(1).
+BlockStmt: Stmt = {
     "let" <n:Name> ":" <t:Type> "=" <e:Expr>    => Stmt::from(SNode::Decl(Box::new(Expr::from(ENode::Variable(n))), t, e)),
     "let" <n:Name> "=" <e:Expr>                 => Stmt::from(SNode::Decl(Box::new(Expr::from(ENode::Variable(n))), Box::new(Type { t : Monotype::infer() }), e)),
-    <e:Expr>                                    => Stmt::from(SNode::Expr(e)),
-    "print" <e:Expr>                            => Stmt::from(SNode::Print(e)),
+    "print" <e:Term>                            => Stmt::from(SNode::Print(e)),
 };
+
+// Zero or more BlockStmt;s for the statement prefix of a block expression.
+BlkBody: Vec<Stmt> = {
+    => vec![],
+    <mut v:BlkBody> <s:BlockStmt> ";" => { v.push(s); v },
+}
 
 pub Expr: Box<Expr> = {
     Abs_Expr                                            => <>,
@@ -27,6 +38,8 @@ pub Expr: Box<Expr> = {
     "if" <c:Expr> "then" <e1:Expr> "else" <e2: Expr>    => Box::new(Expr::from(ENode::IfElse(c, e1, e2))),
     // TODO: pattern matching
     App_Expr                                            => <>,
+    "{" <ss:BlkBody> <e:Expr> "}"                            => Box::new(Expr::from(ENode::Block(ss, e))),
+    "[" <es:Comma<Expr>> "]"                            => Box::new(Expr::from(ENode::List(es.into_iter().map(|b| *b).collect())))
 };
 
 // TODO: function currying (multiple binders)
@@ -83,6 +96,16 @@ SimpleType: Box<Type> = {
 // ----------------------------------------------------------------------------
 // Util
 // ----------------------------------------------------------------------------
+
+Comma<T>: Vec<T> = {
+    <mut vec:(<T> ",")*> <e:T?> => match e {
+        None => vec,
+        Some(e) => {
+            vec.push(e);
+            vec
+        }
+    }
+};
 
 SemiCol<T>: Vec<T> = {
     <mut vec:(<T> ";")*> <e:T?> => match e {

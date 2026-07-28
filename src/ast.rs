@@ -54,6 +54,41 @@ impl Stmt {
             pos : Pos::nil()
         }
     }
+
+    pub fn typecheck(&mut self, ctx : &TypeContext) -> Result<(Substitution, Monotype), UnificationError> {
+        let mut context = ctx.clone();
+        match &*self.s {
+            SNode::Decl(e1, t1, e2) => {
+                let var_name = match &*e1.e {
+                    ENode::Variable(name) => name.clone(),
+                    _ => return Err(UnificationError { message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
+                };
+                let binding_type = type_to_typefn(t1, &mut context);
+                let (s1, inferred_type) = algo_w(&mut context, e2)?;
+                let s2 = unify(&binding_type.apply(&s1), &inferred_type)?;
+                let combined = s1.combine(s2);
+                context = context.apply(&combined);
+                let resolved_typ = binding_type.apply(&combined);
+                let generalized = context.generalise(&resolved_typ);
+                context.add(var_name, generalized);
+                self.ctx = context;
+                Ok((combined, resolved_typ))
+            },
+            SNode::Expr(e1) => {
+                let (sub, typ) = algo_w(&mut context, e1)?;
+                self.ctx = context.apply(&sub);
+                Ok((sub, typ))
+            },
+            SNode::Print(e1) => {
+                let (s1, t1) = algo_w(&mut context, e1)?;
+                let s2 = unify(&t1, &Monotype::string())?;
+                let combined = s1.combine(s2);
+                context = context.apply(&combined);
+                self.ctx = context;
+                Ok((combined, Monotype::unit()))
+            }
+        }
+    }
 }
 
 // TODO: Wrap into struct that contains typing context & other metadata?
@@ -65,6 +100,8 @@ pub enum ENode {
     Application(Box<Expr>, Box<Expr>),
     Let(String,Box<Expr>,Box<Expr>),
     IfElse(Box<Expr>,Box<Expr>,Box<Expr>),
+    Block(Vec<Stmt>, Box<Expr>),
+    List(Vec<Expr>)
 }
 
 #[derive(Debug, PartialEq)]
@@ -115,10 +152,12 @@ impl Program {
         grammar::ProgParser::new().parse(buf).map_err(|e| format!("{}", e))
     }
 
-    pub fn typecheck(prog : &mut Program) {
-        // TODO: for each statement, perform type inference, making sure to keep the program's
-        // typing context up-to-date
-        let res = algo_w(&mut prog.ctx, &Box::new(Expr::from(ENode::Variable(String::new()))));
+    pub fn typecheck(prog : &mut Program) -> Result<(), UnificationError> {
+        for stmt in prog.stmts.iter_mut() {
+            stmt.typecheck(&prog.ctx)?;
+            prog.ctx = stmt.ctx.clone();
+        }
+        Ok(())
     }
 }
 
@@ -269,6 +308,117 @@ mod tests {
                 ))),
             ))))
         );
+    }
+
+    // ---- Block expressions ----
+
+    #[test]
+    fn block_only_expression() {
+        let p = parse("{ 42 };");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Block(
+                vec![],
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn block_with_one_let() {
+        let p = parse("{ let x = 1; x };");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Block(
+                vec![Stmt::from(SNode::Decl(
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                    Box::new(Type { t: Monotype::infer() }),
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+                ))],
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn block_with_multiple_stmts() {
+        let p = parse("{ let x = 1; let y = 2; x };");
+        let block = match &*first(&p).s {
+            SNode::Expr(e) => &*e.e,
+            _ => panic!("expected Expr"),
+        };
+        let ENode::Block(stmts, expr) = block else {
+            panic!("expected Block");
+        };
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(&*stmts[0].s, SNode::Decl(..)));
+        assert!(matches!(&*stmts[1].s, SNode::Decl(..)));
+        assert_eq!(&*expr.e, &ENode::Variable("x".to_string()));
+    }
+
+    #[test]
+    fn block_in_let_rhs() {
+        let p = parse("let x = { 42 };");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Decl(
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                Box::new(Type { t: Monotype::infer() }),
+                Box::new(Expr::from(ENode::Block(
+                    vec![],
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))),
+                ))),
+            )
+        );
+    }
+
+    #[test]
+    fn block_in_if_else_branches() {
+        let p = parse("if true then { 1 } else { 2 };");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::IfElse(
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(true))))),
+                Box::new(Expr::from(ENode::Block(
+                    vec![],
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+                ))),
+                Box::new(Expr::from(ENode::Block(
+                    vec![],
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(2))))),
+                ))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn nested_block() {
+        let p = parse("{ { 42 } };");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Block(
+                vec![],
+                Box::new(Expr::from(ENode::Block(
+                    vec![],
+                    Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))),
+                ))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn block_with_print() {
+        let p = parse(r#"{ print "hi"; 42 };"#);
+        let block = match &*first(&p).s {
+            SNode::Expr(e) => &*e.e,
+            _ => panic!("expected Expr"),
+        };
+        let ENode::Block(stmts, expr) = block else {
+            panic!("expected Block");
+        };
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(&*stmts[0].s, SNode::Print(..)));
+        assert_eq!(&*expr.e, &ENode::Literal(Box::new(Lit::Int(42))));
     }
 
     // ---- Abstraction ----
@@ -670,6 +820,98 @@ mod tests {
             }
             other => panic!("expected Decl, got {:?}", other),
         }
+    }
+
+    // ---- Whole program typechecking ----
+
+    #[test]
+    fn typecheck_empty_program() {
+        let mut p = parse("");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_int_literal() {
+        let mut p = parse("42;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_let_decl() {
+        let mut p = parse("let x = 42;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_let_and_use() {
+        let mut p = parse("let x = 42; x;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_let_annotated() {
+        let mut p = parse("let x : int = 42; x;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_let_wrong_annotation() {
+        let mut p = parse("let x : bool = 42;");
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn typecheck_function_application() {
+        let mut p = parse("let f = \\x => x; f 42;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_print_string() {
+        let mut p = parse(r#"print "hi";"#);
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_print_non_string() {
+        let mut p = parse("print 42;");
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn typecheck_undefined_variable() {
+        let mut p = parse("x;");
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn typecheck_multiple_decls() {
+        let mut p = parse("let x = 1; let y = 2; x; y;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_polymorphic_let() {
+        let mut p = parse("let id = \\x => x; id 42; id true;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_if_else() {
+        let mut p = parse("if true then 1 else 2;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_if_else_non_bool_cond() {
+        let mut p = parse("if 1 then 2 else 3;");
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn typecheck_if_else_branch_mismatch() {
+        let mut p = parse("if true then 1 else true;");
+        assert!(Program::typecheck(&mut p).is_err());
     }
 
     // ---- Error cases ----
