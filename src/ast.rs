@@ -210,7 +210,10 @@ mod tests {
     #[test]
     fn negative_int_literal() {
         let p = parse("-7;");
-        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(-7)))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Unary(
+            UnaryOp::Negate,
+            Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(7))))),
+        )))));
     }
 
     #[test]
@@ -222,7 +225,10 @@ mod tests {
     #[test]
     fn negative_float_literal() {
         let p = parse("-2.5;");
-        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Float(-2.5)))))));
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Unary(
+            UnaryOp::Negate,
+            Box::new(Expr::from(ENode::Literal(Box::new(Lit::Float(2.5))))),
+        )))));
     }
 
     #[test]
@@ -843,6 +849,91 @@ mod tests {
         }
     }
 
+    // ---- Unary expressions ---- 
+
+    #[test]
+    fn negate_variable() {
+        let p = parse("-x;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Unary(
+                UnaryOp::Negate,
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn not_variable() {
+        let p = parse("!x;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Unary(
+                UnaryOp::Not,
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn not_true() {
+        let p = parse("!true;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Unary(
+                UnaryOp::Not,
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(true))))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn double_negation() {
+        let p = parse("--x;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Unary(
+                UnaryOp::Negate,
+                Box::new(Expr::from(ENode::Unary(
+                    UnaryOp::Negate,
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                ))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn negate_precedence_over_mul() {
+        let p = parse("-x * y;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Arithmetic(
+                ArithOp::Times,
+                Box::new(Expr::from(ENode::Unary(
+                    UnaryOp::Negate,
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                ))),
+                Box::new(Expr::from(ENode::Variable("y".to_string()))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn not_precedence_over_and() {
+        let p = parse("!x && y;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Logical(
+                LogicalOp::And,
+                Box::new(Expr::from(ENode::Unary(
+                    UnaryOp::Not,
+                    Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                ))),
+                Box::new(Expr::from(ENode::Variable("y".to_string()))),
+            ))))
+        );
+    }
+
     // ---- Whole program typechecking ----
 
     #[test]
@@ -1095,6 +1186,56 @@ mod tests {
             Box::new(Expr::from(ENode::Variable("a".to_string()))),
             Box::new(Expr::from(ENode::Variable("b".to_string()))),
         )))));
+    }
+
+    // ---- Unary typechecking ----
+
+    #[test]
+    fn typecheck_negate_int() {
+        let mut p = parse("-5;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_negate_float() {
+        let mut p = parse("-3.14;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_negate_string_error() {
+        let mut p = parse(r#"-"hi";"#);
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn typecheck_not_bool() {
+        let mut p = parse("!true;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_not_int_error() {
+        let mut p = parse("!5;");
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn typecheck_not_string_error() {
+        let mut p = parse(r#"!"hi";"#);
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn typecheck_negate_in_let() {
+        let mut p = parse("let x : int = -5; x;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_not_in_if_cond() {
+        let mut p = parse("if !false then 1 else 2;");
+        assert!(Program::typecheck(&mut p).is_ok());
     }
 
     // ---- Error cases ----

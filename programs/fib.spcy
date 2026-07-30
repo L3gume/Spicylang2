@@ -1,0 +1,9 @@
+# Example fibonacci sequence program
+
+let fib = \(n : int) =>
+    if n > 1 then
+        fib (n - 1) + fib (n - 2)
+    else
+        1;
+
+let fifth = fib 5;

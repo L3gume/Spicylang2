@@ -120,7 +120,8 @@ Literal: Box<Lit> = {
 
 Type: Box<Type> = {
     SimpleType => <>,
-    <t1:SimpleType> "=>" <t2:Type> => Box::new(Type { t: Monotype::func(vec![t1.t.clone(), t2.t.clone()]) })
+    <t1:SimpleType> "=>" <t2:Type> => Box::new(Type { t: Monotype::func(vec![t1.t, t2.t]) }),
+    "list" <t:Type> => Box::new(Type { t: Monotype::list(vec![t.t])})
 };
 
 SimpleType: Box<Type> = {
