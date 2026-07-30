@@ -71,10 +71,16 @@ AddExpr: Box<Expr> = {
 
 // --- Multiplication/division/modulo (*, /, %) ---
 MulExpr: Box<Expr> = {
+    UnaryExpr => <>,
+    <e1:MulExpr> "*" <e2:UnaryExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Times, e1, e2))),
+    <e1:MulExpr> "/" <e2:UnaryExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Div, e1, e2))),
+    <e1:MulExpr> "%" <e2:UnaryExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Mod, e1, e2))),
+}
+
+UnaryExpr: Box<Expr> = {
     AppExpr => <>,
-    <e1:MulExpr> "*" <e2:AppExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Times, e1, e2))),
-    <e1:MulExpr> "/" <e2:AppExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Div, e1, e2))),
-    <e1:MulExpr> "%" <e2:AppExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Mod, e1, e2))),
+    "-" <e:UnaryExpr> => Box::new(Expr::from(ENode::Unary(UnaryOp::Negate, e))),
+    "!" <e:UnaryExpr> => Box::new(Expr::from(ENode::Unary(UnaryOp::Not, e))),
 }
 
 // --- Function application (highest binary precedence) ---
@@ -100,8 +106,8 @@ Name: String = {
 };
 
 Literal: Box<Lit> = {
-    <n:r"-?[0-9]+\.[0-9]+"> => Box::new(Lit::Float(f32::from_str(n).unwrap())),
-    <n:r"-?[0-9]+">         => Box::new(Lit::Int(i32::from_str(n).unwrap())),
+    <n:r"[0-9]+\.[0-9]+"> => Box::new(Lit::Float(f32::from_str(n).unwrap())),
+    <n:r"[0-9]+">         => Box::new(Lit::Int(i32::from_str(n).unwrap())),
     "true"                  => Box::new(Lit::Bool(true)),
     "false"                 => Box::new(Lit::Bool(false)),
     <s:r#"\"[^"]*\""#>      => Box::new(Lit::Str(s[1..s.len()-1].to_string())),

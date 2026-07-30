@@ -106,9 +106,7 @@
  */
 use std::collections::HashMap;
 
-use crate::ast::{ArithOp, Binding, CompOp, Expr, Lit, Type};
-use crate::ast::ENode;
-use crate::ast::SNode;
+use crate::ast::*;
 use crate::types::Monotype::TypeFuncApplication;
 
 
@@ -580,6 +578,28 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                 .map_err(|_| UnificationError { message: format!("Logical operations require bool operands, got {:?}", unified) })?;
             Ok((s1.combine(s2).combine(s3).combine(s4), Monotype::bool()))
         },
+        ENode::Unary(op, e) => match op {
+            UnaryOp::Negate => {
+                let (s1, t1) = algo_w(context, e)?;
+                if matches!(t1, Monotype::TypeVariable(_)) {
+                    *context = context.apply(&s1);
+                    return Ok((s1, t1));
+                }
+                let s2 = unify(&t1, &Monotype::int())
+                    .or_else(|_| unify(&t1, &Monotype::float()))
+                    .map_err(|_| UnificationError { message: format!("Unary negation requires int or float operand, got {:?}", t1) })?;
+                let s3 = s1.combine(s2);
+                *context = context.apply(&s3);
+                Ok((s3.clone(), t1.apply(&s3)))
+            },
+            UnaryOp::Not => {
+                let (s1, t1) = algo_w(context, e)?;
+                let s2 = unify(&t1, &Monotype::bool())?;
+                let s3 = s1.combine(s2);
+                *context = context.apply(&s3);
+                Ok((s3.clone(), Monotype::bool()))
+            },
+        }
         ENode::Literal(lit) => {
             let typ = match lit.as_ref() {
                 Lit::Int(_) => Monotype::int(),
@@ -726,6 +746,7 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
             let s2 = algo_m(&mut context.apply(&s1), e2, &beta.apply(&s1))?;
             let resolved = beta.apply(&s1).apply(&s2);
             let s0 = unify(typ, &resolved)?;
+            let resolved = resolved.apply(&s0);
             if !matches!(resolved, Monotype::TypeVariable(_)) {
                 match op {
                     ArithOp::Plus => {
@@ -780,6 +801,34 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
             let s1 = algo_m(context, e1, &Monotype::bool())?;
             let s2 = algo_m(&mut context.apply(&s1), e2, &Monotype::bool())?;
             Ok(s0.combine(s1).combine(s2))
+        },
+        ENode::Unary(op, e) => match op {
+            UnaryOp::Negate => {
+                let beta = Monotype::var(context.new_typevar());
+                let s0 = algo_m(context, e, &beta)?;
+                let resolved = beta.apply(&s0);
+                let s0_typ = unify(&resolved, typ)?;
+                let resolved = resolved.apply(&s0_typ);
+                let s1 = s0.combine(s0_typ);
+                if matches!(resolved, Monotype::TypeVariable(_)) {
+                    *context = context.apply(&s1);
+                    return Ok(s1);
+                }
+                let s2 = unify(&resolved, &Monotype::int())
+                    .or_else(|_| unify(&resolved, &Monotype::float()))
+                    .map_err(|_| UnificationError { message: format!("Unary negation requires int or float operand, got {:?}", resolved) })?;
+                let s3 = s1.combine(s2);
+                *context = context.apply(&s3);
+                Ok(s3.clone())
+            },
+            UnaryOp::Not => {
+                let s0 = unify(typ, &Monotype::bool())
+                    .map_err(|_| UnificationError { message: format!("Unary not requires bool result, got {:?}", typ)})?;
+                let beta = Monotype::var(context.new_typevar());
+                let s1 = algo_m(context, e, &beta)?;
+                let s2 = unify(&beta.apply(&s1), &Monotype::bool())?;
+                Ok(s0.combine(s1).combine(s2))
+            },
         },
         ENode::Literal(lit) => {
             let t = match lit.as_ref() {
@@ -1154,6 +1203,10 @@ mod tests {
         Box::new(Expr::from(ENode::List(exps.into_iter().map(|b| *b).collect())))
     }
 
+    fn unary(op: UnaryOp, e: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::from(ENode::Unary(op, e)))
+    }
+
     fn ctx_with(pairs: Vec<(&str, Polytype)>) -> TypeContext {
         TypeContext::make(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
@@ -1347,6 +1400,128 @@ mod tests {
     fn w_if_else_branches_mismatch() {
         let mut ctx = TypeContext::new();
         let result = algo_w(&mut ctx, &if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Bool(false))));
+        assert!(result.is_err());
+    }
+
+    // ===== W: unary expressions =====
+
+    #[test]
+    fn w_negate_int() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Int(5))));
+        assert_eq!(result, Ok((Substitution::new(), int())));
+    }
+
+    #[test]
+    fn w_negate_float() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Float(3.14))));
+        assert_eq!(result, Ok((Substitution::new(), Monotype::float())));
+    }
+
+    #[test]
+    fn w_negate_string_error() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Str("hi".to_string()))));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn w_not_bool() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Bool(true))));
+        assert_eq!(result, Ok((Substitution::new(), bool())));
+    }
+
+    #[test]
+    fn w_not_int_error() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Int(5))));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn w_not_string_error() {
+        let mut ctx = TypeContext::new();
+        let result = algo_w(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Str("hi".to_string()))));
+        assert!(result.is_err());
+    }
+
+    // ===== M: unary expressions =====
+
+    #[test]
+    fn m_negate_int_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Int(5))), &int());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_negate_int_mismatch() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Int(5))), &bool());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_negate_float_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Float(1.5))), &Monotype::float());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_negate_refines_var() {
+        let mut ctx = TypeContext::new();
+        let tv = var("a");
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Int(5))), &tv);
+        assert!(result.is_ok());
+        let sub = result.unwrap();
+        assert_eq!(tv.apply(&sub), int());
+    }
+
+    #[test]
+    fn m_negate_string_via_typ_error() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Int(5))), &Monotype::string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_not_bool_matches() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Bool(true))), &bool());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn m_not_bool_mismatch() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Bool(true))), &int());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_not_refines_var() {
+        let mut ctx = TypeContext::new();
+        let tv = var("a");
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Bool(true))), &tv);
+        assert!(result.is_ok());
+        let sub = result.unwrap();
+        assert_eq!(tv.apply(&sub), bool());
+    }
+
+    #[test]
+    fn m_not_int_operand_error() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Int(5))), &bool());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m_not_string_operand_error() {
+        let mut ctx = TypeContext::new();
+        let result = algo_m(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Str("hi".to_string()))), &bool());
         assert!(result.is_err());
     }
 
@@ -1663,6 +1838,32 @@ mod tests {
     #[test]
     fn w_and_m_agree_polymorphic_let() {
         let expr = let_in("id", lam_infer("x", v("x")), app(v("id"), lit(Lit::Int(5))));
+
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &resolved);
+        assert!(result_m.is_ok());
+    }
+
+    #[test]
+    fn w_and_m_agree_negate_int() {
+        let expr = unary(UnaryOp::Negate, lit(Lit::Int(42)));
+
+        let mut ctx_w = TypeContext::new();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let resolved = typ_w.apply(&sub_w);
+
+        let mut ctx_m = TypeContext::new();
+        let result_m = algo_m(&mut ctx_m, &expr, &resolved);
+        assert!(result_m.is_ok());
+    }
+
+    #[test]
+    fn w_and_m_agree_not_bool() {
+        let expr = unary(UnaryOp::Not, lit(Lit::Bool(true)));
 
         let mut ctx_w = TypeContext::new();
         let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();

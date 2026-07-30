@@ -109,6 +109,7 @@ pub enum ENode {
     Comparison(CompOp, Box<Expr>, Box<Expr>),
     Arithmetic(ArithOp, Box<Expr>, Box<Expr>),
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
+    Unary(UnaryOp, Box<Expr>),
     List(Vec<Expr>)
 }
 
@@ -153,6 +154,12 @@ pub enum LogicalOp {
     And,
     Or,
     Xor,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnaryOp {
+    Negate,
+    Not
 }
 
 #[derive(Debug)]
