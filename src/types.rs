@@ -106,7 +106,7 @@
  */
 use std::collections::HashMap;
 
-use crate::ast::{Binding, Expr, Lit, Stmt, Type};
+use crate::ast::{ArithOp, Binding, CompOp, Expr, Lit, Type};
 use crate::ast::ENode;
 use crate::ast::SNode;
 use crate::types::Monotype::TypeFuncApplication;
@@ -501,6 +501,69 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                 Ok((combined, Monotype::list(vec![elem_type])))
             }
         },
+        ENode::Arithmetic(op, e1, e2) => {
+            let (s1, t1) = algo_w(context, e1)?;
+            *context = context.apply(&s1);
+            let (s2, t2) = algo_w(context, e2)?;
+            let s3 = unify(&t1.apply(&s2), &t2)?;
+            let unified = t1.apply(&s2).apply(&s3);
+            if !matches!(unified, Monotype::TypeVariable(_)) {
+                match op {
+                    ArithOp::Plus => {
+                        unify(&unified, &Monotype::int())
+                            .or_else(|_| unify(&unified, &Monotype::float()))
+                            .or_else(|_| unify(&unified, &Monotype::string()))
+                            .map_err(|_| UnificationError { message: format!("'+' requires int, float, or string operands, got {:?}", unified) })?;
+                    },
+                    _ => {
+                        unify(&unified, &Monotype::int())
+                            .or_else(|_| unify(&unified, &Monotype::float()))
+                            .map_err(|_| UnificationError { message: format!("{:?} requires int or float operands, got {:?}", op, unified) })?;
+                    },
+                }
+            }
+            Ok((s1.combine(s2).combine(s3), unified))
+        },
+        ENode::Comparison(op, e1, e2) => {
+            let (s1, t1) = algo_w(context, e1)?;
+            *context = context.apply(&s1);
+            let (s2, t2) = algo_w(context, e2)?;
+            let s3 = unify(&t1.apply(&s2), &t2)?;
+            let unified = t1.apply(&s2).apply(&s3);
+            if !matches!(unified, Monotype::TypeVariable(_)) {
+                match op {
+                    CompOp::Eq | CompOp::NotEq => {
+                        if let Monotype::TypeFuncApplication(f, _) = &unified {
+                            if **f == TypeFunc::Fn {
+                                return Err(UnificationError { message: "Cannot compare function types".to_string() });
+                            }
+                        }
+                        let op_name = if *op == CompOp::Eq { "==" } else { "!=" };
+                        unify(&unified, &Monotype::int())
+                            .or_else(|_| unify(&unified, &Monotype::float()))
+                            .or_else(|_| unify(&unified, &Monotype::string()))
+                            .or_else(|_| unify(&unified, &Monotype::bool()))
+                            .map_err(|_| UnificationError { message: format!("'{}' requires int, float, string, or bool operands", op_name) })?;
+                    },
+                    _ => {
+                        unify(&unified, &Monotype::int())
+                            .or_else(|_| unify(&unified, &Monotype::float()))
+                            .map_err(|_| UnificationError { message: "Comparison requires int or float operands".to_string() })?;
+                    },
+                }
+            }
+            Ok((s1.combine(s2).combine(s3), Monotype::bool()))
+        },
+        ENode::Logical(_, e1, e2) => {
+            let (s1, t1) = algo_w(context, e1)?;
+            *context = context.apply(&s1);
+            let (s2, t2) = algo_w(context, e2)?;
+            let s3 = unify(&t1.apply(&s2), &t2)?;
+            let unified = t1.apply(&s2).apply(&s3);
+            let s4 = unify(&unified, &Monotype::bool())
+                .map_err(|_| UnificationError { message: format!("Logical operations require bool operands, got {:?}", unified) })?;
+            Ok((s1.combine(s2).combine(s3).combine(s4), Monotype::bool()))
+        },
         ENode::Literal(lit) => {
             let typ = match lit.as_ref() {
                 Lit::Int(_) => Monotype::int(),
@@ -624,6 +687,67 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
                 }
                 Ok(combined)
             }
+        },
+        ENode::Arithmetic(op, e1, e2) => {
+            let beta = Monotype::var(context.new_typevar());
+            let s1 = algo_m(context, e1, &beta)?;
+            let s2 = algo_m(&mut context.apply(&s1), e2, &beta.apply(&s1))?;
+            let resolved = beta.apply(&s1).apply(&s2);
+            let s0 = unify(typ, &resolved)?;
+            if !matches!(resolved, Monotype::TypeVariable(_)) {
+                match op {
+                    ArithOp::Plus => {
+                        unify(&resolved, &Monotype::int())
+                            .or_else(|_| unify(&resolved, &Monotype::float()))
+                            .or_else(|_| unify(&resolved, &Monotype::string()))
+                            .map_err(|_| UnificationError { message: format!("'+' requires int, float, or string operands, got {:?}", resolved) })?;
+                    },
+                    _ => {
+                        unify(&resolved, &Monotype::int())
+                            .or_else(|_| unify(&resolved, &Monotype::float()))
+                            .map_err(|_| UnificationError { message: format!("{:?} requires int or float operands, got {:?}", op, resolved) })?;
+                    },
+                }
+            }
+            Ok(s0.combine(s1).combine(s2))
+        },
+        ENode::Comparison(op, e1, e2) => {
+            let s0 = unify(typ, &Monotype::bool())
+                .map_err(|_| UnificationError { message: format!("Comparison requires bool result, got {:?}", typ) })?;
+            let beta = Monotype::var(context.new_typevar());
+            let s1 = algo_m(context, e1, &beta)?;
+            let s2 = algo_m(&mut context.apply(&s1), e2, &beta.apply(&s1))?;
+            let resolved = beta.apply(&s1).apply(&s2);
+            if !matches!(resolved, Monotype::TypeVariable(_)) {
+                match op {
+                    CompOp::Eq | CompOp::NotEq => {
+                        if let Monotype::TypeFuncApplication(f, _) = &resolved {
+                            if **f == TypeFunc::Fn {
+                                return Err(UnificationError { message: "Cannot compare function types".to_string() });
+                            }
+                        }
+                        let op_name = if *op == CompOp::Eq { "==" } else { "!=" };
+                        unify(&resolved, &Monotype::int())
+                            .or_else(|_| unify(&resolved, &Monotype::float()))
+                            .or_else(|_| unify(&resolved, &Monotype::string()))
+                            .or_else(|_| unify(&resolved, &Monotype::bool()))
+                            .map_err(|_| UnificationError { message: format!("'{}' requires int, float, string, or bool operands", op_name) })?;
+                    },
+                    _ => {
+                        unify(&resolved, &Monotype::int())
+                            .or_else(|_| unify(&resolved, &Monotype::float()))
+                            .map_err(|_| UnificationError { message: "Comparison requires int or float operands".to_string() })?;
+                    },
+                }
+            }
+            Ok(s0.combine(s1).combine(s2))
+        },
+        ENode::Logical(_, e1, e2) => {
+            let s0 = unify(typ, &Monotype::bool())
+                .map_err(|_| UnificationError { message: format!("Logical operations require bool result, got {:?}", typ) })?;
+            let s1 = algo_m(context, e1, &Monotype::bool())?;
+            let s2 = algo_m(&mut context.apply(&s1), e2, &Monotype::bool())?;
+            Ok(s0.combine(s1).combine(s2))
         },
         ENode::Literal(lit) => {
             let t = match lit.as_ref() {
@@ -834,7 +958,7 @@ mod tests {
     fn polytype_instantiate_quantifier_function() {
         let p = forall("a", mono(fn_type(var("a"), bool())));
         let mut ctx = TypeContext::new();
-        let mut map = mappings(vec![]);
+        let map = mappings(vec![]);
         assert_eq!(p.instantiate(&mut ctx, Some(map)), fn_type(var("t0"), bool()));
     }
 

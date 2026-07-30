@@ -101,6 +101,9 @@ pub enum ENode {
     Let(String,Box<Expr>,Box<Expr>),
     IfElse(Box<Expr>,Box<Expr>,Box<Expr>),
     Block(Vec<Stmt>, Box<Expr>),
+    Comparison(CompOp, Box<Expr>, Box<Expr>),
+    Arithmetic(ArithOp, Box<Expr>, Box<Expr>),
+    Logical(LogicalOp, Box<Expr>, Box<Expr>),
     List(Vec<Expr>)
 }
 
@@ -122,9 +125,10 @@ impl Expr {
 }
 
 // TODO: These are expressions of type TypeFuncApp(OP, [e1, e2, Bool]) where OP : \e1 -> \e2 -> Bool
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CompOp {
     Eq,
+    NotEq,
     Less,
     Greater,
     LessEq,
@@ -132,13 +136,20 @@ pub enum CompOp {
 }
 
 // TODO: These are expressions of type TypeFuncApp(OP, [e1 : τ, e2 : τ, τ]) where OP : \e1 -> \e2 -> τ
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ArithOp {
     Plus,
     Minus,
     Div,
     Times,
     Mod,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogicalOp {
+    And,
+    Or,
+    Xor,
 }
 
 #[derive(Debug)]
@@ -912,6 +923,148 @@ mod tests {
     fn typecheck_if_else_branch_mismatch() {
         let mut p = parse("if true then 1 else true;");
         assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    // ---- Binary expressions ----
+
+    #[test]
+    fn arith_plus() {
+        let p = parse("1 + 2;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Arithmetic(
+            ArithOp::Plus,
+            Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+            Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(2))))),
+        )))));
+    }
+
+    #[test]
+    fn arith_minus() {
+        let p = parse("x - y;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Arithmetic(
+            ArithOp::Minus,
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            Box::new(Expr::from(ENode::Variable("y".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn arith_times() {
+        let p = parse("a * b;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Arithmetic(
+            ArithOp::Times,
+            Box::new(Expr::from(ENode::Variable("a".to_string()))),
+            Box::new(Expr::from(ENode::Variable("b".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn arith_div() {
+        let p = parse("a / b;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Arithmetic(
+            ArithOp::Div,
+            Box::new(Expr::from(ENode::Variable("a".to_string()))),
+            Box::new(Expr::from(ENode::Variable("b".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn arith_mod() {
+        let p = parse("x % y;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Arithmetic(
+            ArithOp::Mod,
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            Box::new(Expr::from(ENode::Variable("y".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn comp_eq() {
+        let p = parse("x == y;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Comparison(
+            CompOp::Eq,
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            Box::new(Expr::from(ENode::Variable("y".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn comp_not_eq() {
+        let p = parse("x != y;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Comparison(
+            CompOp::NotEq,
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            Box::new(Expr::from(ENode::Variable("y".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn comp_less() {
+        let p = parse("1 < 2;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Comparison(
+            CompOp::Less,
+            Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))),
+            Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(2))))),
+        )))));
+    }
+
+    #[test]
+    fn comp_greater() {
+        let p = parse("x > y;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Comparison(
+            CompOp::Greater,
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            Box::new(Expr::from(ENode::Variable("y".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn comp_less_eq() {
+        let p = parse("x <= y;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Comparison(
+            CompOp::LessEq,
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            Box::new(Expr::from(ENode::Variable("y".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn comp_great_eq() {
+        let p = parse("x >= y;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Comparison(
+            CompOp::GreatEq,
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            Box::new(Expr::from(ENode::Variable("y".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn logic_and() {
+        let p = parse("true && false;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Logical(
+            LogicalOp::And,
+            Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(true))))),
+            Box::new(Expr::from(ENode::Literal(Box::new(Lit::Bool(false))))),
+        )))));
+    }
+
+    #[test]
+    fn logic_or() {
+        let p = parse("x || y;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Logical(
+            LogicalOp::Or,
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            Box::new(Expr::from(ENode::Variable("y".to_string()))),
+        )))));
+    }
+
+    #[test]
+    fn logic_xor() {
+        let p = parse("a ^ b;");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Logical(
+            LogicalOp::Xor,
+            Box::new(Expr::from(ENode::Variable("a".to_string()))),
+            Box::new(Expr::from(ENode::Variable("b".to_string()))),
+        )))));
     }
 
     // ---- Error cases ----

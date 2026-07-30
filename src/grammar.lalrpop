@@ -1,11 +1,4 @@
-use crate::ast::Expr;
-use crate::ast::ENode;
-use crate::ast::Stmt;
-use crate::ast::SNode;
-use crate::ast::Binding;
-use crate::ast::Type;
-use crate::ast::Lit;
-use crate::ast::Program;
+use crate::ast::*;
 use crate::types::Monotype;
 use crate::types::TypeContext;
 use std::str::FromStr;
@@ -23,7 +16,7 @@ pub Stmt: Stmt = {
 BlockStmt: Stmt = {
     "let" <n:Name> ":" <t:Type> "=" <e:Expr>    => Stmt::from(SNode::Decl(Box::new(Expr::from(ENode::Variable(n))), t, e)),
     "let" <n:Name> "=" <e:Expr>                 => Stmt::from(SNode::Decl(Box::new(Expr::from(ENode::Variable(n))), Box::new(Type { t : Monotype::infer() }), e)),
-    "print" <e:Term>                            => Stmt::from(SNode::Print(e)),
+    "print" <e:Atom>                            => Stmt::from(SNode::Print(e)),
 };
 
 // Zero or more BlockStmt;s for the statement prefix of a block expression.
@@ -32,14 +25,17 @@ BlkBody: Vec<Stmt> = {
     <mut v:BlkBody> <s:BlockStmt> ";" => { v.push(s); v },
 }
 
+// Precedence cascade: lowest to highest
+//   LogExpr < CmpExpr < AddExpr < MulExpr < AppExpr < Atom
+
 pub Expr: Box<Expr> = {
     Abs_Expr                                            => <>,
     "let" <n:Name> "=" <e1:Expr> "in" <e2:Expr>         => Box::new(Expr::from(ENode::Let(n, e1, e2))),
-    "if" <c:Expr> "then" <e1:Expr> "else" <e2: Expr>    => Box::new(Expr::from(ENode::IfElse(c, e1, e2))),
+    "if" <c:Expr> "then" <e1:Expr> "else" <e2:Expr>     => Box::new(Expr::from(ENode::IfElse(c, e1, e2))),
+    LogExpr                                             => <>,
+    "{" <ss:BlkBody> <e:Expr> "}"                       => Box::new(Expr::from(ENode::Block(ss, e))),
+    "[" <es:Comma<Expr>> "]"                            => Box::new(Expr::from(ENode::List(es.into_iter().map(|b| *b).collect()))),
     // TODO: pattern matching
-    App_Expr                                            => <>,
-    "{" <ss:BlkBody> <e:Expr> "}"                            => Box::new(Expr::from(ENode::Block(ss, e))),
-    "[" <es:Comma<Expr>> "]"                            => Box::new(Expr::from(ENode::List(es.into_iter().map(|b| *b).collect())))
 };
 
 // TODO: function currying (multiple binders)
@@ -47,12 +43,48 @@ Abs_Expr: Box<Expr> = {
     "\\" <b:Binding> "=>" <t:Expr>                      => Box::new(Expr::from(ENode::Abstraction(b, t))),
 }
 
-App_Expr: Box<Expr> = {
-    Term                        => <>,
-    <t1:App_Expr> <t2:Term>     => Box::new(Expr::from(ENode::Application(t1, t2)))
+// --- Lowest precedence: logical (||, &&, ^) ---
+LogExpr: Box<Expr> = {
+    CmpExpr => <>,
+    <e1:LogExpr> "||" <e2:CmpExpr> => Box::new(Expr::from(ENode::Logical(LogicalOp::Or, e1, e2))),
+    <e1:LogExpr> "&&" <e2:CmpExpr> => Box::new(Expr::from(ENode::Logical(LogicalOp::And, e1, e2))),
+    <e1:LogExpr> "^"  <e2:CmpExpr> => Box::new(Expr::from(ENode::Logical(LogicalOp::Xor, e1, e2))),
+}
+
+// --- Comparison (==, !=, <, >, <=, >=) ---
+CmpExpr: Box<Expr> = {
+    AddExpr => <>,
+    <e1:AddExpr> "==" <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::Eq, e1, e2))),
+    <e1:AddExpr> "!=" <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::NotEq, e1, e2))),
+    <e1:AddExpr> "<"  <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::Less, e1, e2))),
+    <e1:AddExpr> ">"  <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::Greater, e1, e2))),
+    <e1:AddExpr> "<=" <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::LessEq, e1, e2))),
+    <e1:AddExpr> ">=" <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::GreatEq, e1, e2))),
+}
+
+// --- Addition/subtraction (+, -) ---
+AddExpr: Box<Expr> = {
+    MulExpr => <>,
+    <e1:AddExpr> "+" <e2:MulExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Plus, e1, e2))),
+    <e1:AddExpr> "-" <e2:MulExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Minus, e1, e2))),
+}
+
+// --- Multiplication/division/modulo (*, /, %) ---
+MulExpr: Box<Expr> = {
+    AppExpr => <>,
+    <e1:MulExpr> "*" <e2:AppExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Times, e1, e2))),
+    <e1:MulExpr> "/" <e2:AppExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Div, e1, e2))),
+    <e1:MulExpr> "%" <e2:AppExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Mod, e1, e2))),
+}
+
+// --- Function application (highest binary precedence) ---
+AppExpr: Box<Expr> = {
+    Atom                        => <>,
+    <t1:AppExpr> <t2:Atom>      => Box::new(Expr::from(ENode::Application(t1, t2)))
 };
 
-Term: Box<Expr> = {
+// --- Atoms (primary expressions) ---
+Atom: Box<Expr> = {
     Name                        => Box::new(Expr::from(ENode::Variable(<>))),
     Literal                     => Box::new(Expr::from(ENode::Literal(<>))),
     "(" <e:Expr> ")"            => e

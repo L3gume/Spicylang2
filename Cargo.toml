@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 lalrpop-util = "0.23.1"
+# melior = "0.27.4"  # requires llvm-config
 
 [build-dependencies]
 lalrpop = "0.23.1"
