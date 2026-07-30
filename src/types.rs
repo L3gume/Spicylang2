@@ -348,7 +348,7 @@ pub fn unify(typ1 : &Monotype, typ2 : &Monotype) -> Result<Substitution, Unifica
             Monotype::TypeVariable(_) => unify(typ2, typ1),
             Monotype::TypeFuncApplication(f2, ts2 ) =>
                 if f1 != f2 {
-                    Err(UnificationError { message: format!("Type function application mismatch: {:?} != {:?}", f1, f2) })
+                    Err(UnificationError { message: format!("Type function application mismatch: {:?} != {:?} (full: {:?} vs {:?})", f1, f2, typ1, typ2) })
                 } else {
                     if ts1.len() != ts2.len() {
                         Err(UnificationError { message: format!("Type functions have different number of args: {:?}, {:?}", ts1, ts2) })
@@ -424,11 +424,21 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             Ok((s1.combine(s2).combine(s3.clone()), ret_var.apply(&s3)))
         },
         ENode::Let(name, exp1, exp2) => {
+            let rec_var = Monotype::var(context.new_typevar());
+            let old_binding = context.get(name);
+            context.add(name.clone(), Polytype::Mono(Box::new(rec_var.clone())));
             let (s1, t1) = algo_w(context, exp1)?;
             *context = context.apply(&s1);
-            context.add(name.clone(), context.generalise(&t1));
+            let s_rec = unify(&t1, &rec_var.apply(&s1))?;
+            let combined = s1.combine(s_rec.clone());
+            *context = context.apply(&combined);
+            match old_binding {
+                Some(poly) => context.add(name.clone(), poly),
+                None => context.remove(name),
+            }
+            context.add(name.clone(), context.generalise(&t1.apply(&s_rec)));
             let (s2, t2) = algo_w(context, exp2)?;
-            Ok((s1.combine(s2), t2))
+            Ok((combined.combine(s2), t2))
         }
         ENode::IfElse(cond, exp1, exp2) => {
             let (s1, t1) = algo_w(context, cond)?;
@@ -453,12 +463,18 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                             _ => return Err(UnificationError { message: "Expected a variable name in declaration".to_string() }),
                         };
                         let binding_type = type_to_typefn(t1, context);
+                        let old_binding = context.get(&var_name);
+                        context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
                         let (s1, inferred_type) = algo_w(context, e2)?;
                         *context = context.apply(&s1);
                         combined = combined.combine(s1);
                         let s2 = unify(&binding_type.apply(&combined), &inferred_type)?;
                         *context = context.apply(&s2);
                         combined = combined.combine(s2);
+                        match old_binding {
+                            Some(poly) => context.add(var_name.clone(), poly),
+                            None => context.remove(&var_name),
+                        }
                         let resolved = binding_type.apply(&combined);
                         context.add(var_name, context.generalise(&resolved));
                     },
@@ -617,12 +633,22 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
             Ok(s1.combine(s2))
         },
         ENode::Let(name, exp1, exp2) => {
+            let rec_var = Monotype::var(context.new_typevar());
+            let old_binding = context.get(name);
+            context.add(name.clone(), Polytype::Mono(Box::new(rec_var.clone())));
             let beta = Monotype::var(context.new_typevar());
             let s1 = algo_m(context, exp1, &beta)?;
             *context = context.apply(&s1);
-            context.add(name.clone(), context.generalise(&beta.apply(&s1)));
-            let s2 = algo_m(context, exp2, &typ.apply(&s1))?;
-            Ok(s1.combine(s2))
+            let s_rec = unify(&beta.apply(&s1), &rec_var.apply(&s1))?;
+            let combined = s1.combine(s_rec);
+            *context = context.apply(&combined);
+            match old_binding {
+                Some(poly) => context.add(name.clone(), poly),
+                None => context.remove(name),
+            }
+            context.add(name.clone(), context.generalise(&beta.apply(&combined)));
+            let s2 = algo_m(context, exp2, &typ.apply(&combined))?;
+            Ok(combined.combine(s2))
         },
         ENode::IfElse(cond, exp1, exp2) => {
             let s1 = algo_m(context, cond, &Monotype::bool())?;
@@ -642,6 +668,8 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
                             _ => return Err(UnificationError { message: "Expected a variable name in declaration".to_string() }),
                         };
                         let binding_type = type_to_typefn(t1, context);
+                        let old_binding = context.get(&var_name);
+                        context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
                         let beta = Monotype::var(context.new_typevar());
                         let s1 = algo_m(context, e2, &beta)?;
                         *context = context.apply(&s1);
@@ -649,6 +677,10 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
                         let s2 = unify(&binding_type.apply(&combined), &beta.apply(&s1))?;
                         *context = context.apply(&s2);
                         combined = combined.combine(s2);
+                        match old_binding {
+                            Some(poly) => context.add(var_name.clone(), poly),
+                            None => context.remove(&var_name),
+                        }
                         let resolved = binding_type.apply(&combined);
                         context.add(var_name, context.generalise(&resolved));
                     },

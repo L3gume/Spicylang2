@@ -64,10 +64,16 @@ impl Stmt {
                     _ => return Err(UnificationError { message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
                 };
                 let binding_type = type_to_typefn(t1, &mut context);
+                let old_binding = context.get(&var_name);
+                context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
                 let (s1, inferred_type) = algo_w(&mut context, e2)?;
                 let s2 = unify(&binding_type.apply(&s1), &inferred_type)?;
                 let combined = s1.combine(s2);
                 context = context.apply(&combined);
+                match old_binding {
+                    Some(poly) => context.add(var_name.clone(), poly),
+                    None => context.remove(&var_name),
+                }
                 let resolved_typ = binding_type.apply(&combined);
                 let generalized = context.generalise(&resolved_typ);
                 context.add(var_name, generalized);
@@ -91,7 +97,6 @@ impl Stmt {
     }
 }
 
-// TODO: Wrap into struct that contains typing context & other metadata?
 #[derive(Debug, PartialEq)]
 pub enum ENode {
     Variable(String),
@@ -124,7 +129,6 @@ impl Expr {
     }
 }
 
-// TODO: These are expressions of type TypeFuncApp(OP, [e1, e2, Bool]) where OP : \e1 -> \e2 -> Bool
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompOp {
     Eq,
@@ -135,7 +139,6 @@ pub enum CompOp {
     GreatEq,
 }
 
-// TODO: These are expressions of type TypeFuncApp(OP, [e1 : τ, e2 : τ, τ]) where OP : \e1 -> \e2 -> τ
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArithOp {
     Plus,
@@ -905,6 +908,26 @@ mod tests {
     fn typecheck_polymorphic_let() {
         let mut p = parse("let id = \\x => x; id 42; id true;");
         assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn typecheck_recursive_let_simple() {
+        let src = r"let loop = \(x : int) => if x > 0 then loop 0 else 0;";
+        let mut p = parse(src);
+        match Program::typecheck(&mut p) {
+            Ok(_) => {},
+            Err(e) => panic!("type error: {}", e),
+        }
+    }
+
+    #[test]
+    fn typecheck_recursive_let() {
+        let src = r"let rec = \(x : int) => if x > 0 then rec (x * 1) else 0;";
+        let mut p = parse(src);
+        match Program::typecheck(&mut p) {
+            Ok(_) => {},
+            Err(e) => panic!("type error: {}", e),
+        }
     }
 
     #[test]
