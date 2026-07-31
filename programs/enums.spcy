@@ -1,0 +1,8 @@
+
+enum option('a) =
+    Some('a)
+    | none
+
+enum list('a) =
+    nil
+    | cons('a, list 'a)

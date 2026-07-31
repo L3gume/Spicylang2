@@ -30,12 +30,30 @@ pub struct Type {
 #[derive(Debug, PartialEq)]
 pub struct Binding(pub String, pub Box<Type>);
 
-// TODO: Wrap into struct that contains typing context & other metadata?
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeDec {
+    Alias(Box<Type>),
+    Enum(Vec<Variant>)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub n : String,
+    pub tparams : Vec<Type>
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeHeader {
+    pub n : String,
+    pub tvars : Vec<String>
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SNode {
     Decl(Box<Expr>, Box<Type>, Box<Expr>),  // let x [: Type] = e;
     Expr(Box<Expr>),                        // e; special case, not always ()
     Print(Box<Expr>),                       // print e;
+    TypeDecl(TypeHeader, Box<TypeDec>) // name <type vars> = <type>
 }
 
 #[derive(Debug, PartialEq)]
@@ -63,7 +81,7 @@ impl Stmt {
                     ENode::Variable(name) => name.clone(),
                     _ => return Err(UnificationError { message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
                 };
-                let binding_type = type_to_typefn(t1, &mut context);
+                let binding_type = type_to_typefn(t1, &mut context)?;
                 let old_binding = context.get(&var_name);
                 context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
                 let (s1, inferred_type) = algo_w(&mut context, e2)?;
@@ -92,6 +110,11 @@ impl Stmt {
                 context = context.apply(&combined);
                 self.ctx = context;
                 Ok((combined, Monotype::unit()))
+            },
+            SNode::TypeDecl(header, dec) => {
+                handle_type_decl(header, dec, &mut context)?;
+                self.ctx = context;
+                Ok((Substitution::new(), Monotype::unit()))
             }
         }
     }
@@ -110,7 +133,9 @@ pub enum ENode {
     Arithmetic(ArithOp, Box<Expr>, Box<Expr>),
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
-    List(Vec<Expr>)
+    List(Vec<Expr>),
+    Cons(Box<Expr>, Box<Expr>),
+    Match(Box<Expr>, Vec<MatchCase>)
 }
 
 #[derive(Debug, PartialEq)]
@@ -128,6 +153,12 @@ impl Expr {
             pos : Pos::nil()
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct MatchCase {
+    v : Box<Expr>,
+    e : Box<Expr>
 }
 
 #[derive(Debug, Clone, PartialEq)]
