@@ -1,0 +1,16 @@
+
+
+let iter = \fn ls => match ls
+    | [] => ()
+    | x::xs => {
+        let unit = fn x;
+        iter fn xs
+    }
+    ;
+
+let map = \fn ls => match ls
+    | [] => []
+    | x::xs => (fn x)::(map fn xs)
+    ;
+
+let add = \x y => x + y;

@@ -206,8 +206,8 @@ impl Monotype {
         Monotype::TypeFuncApplication(Box::new(TypeFunc::Fn), vars)
     }
 
-    pub fn list(vars : Vec<Monotype>) -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunc::List), vars)
+    pub fn list(var : Monotype) -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::List), vec![var])
     }
 
     pub fn enum_type(name : String) -> Monotype {
@@ -345,13 +345,23 @@ impl TypeContext {
         self.variables.values().flat_map(|t| t.free_variables()).collect()
     }
 
-    pub fn generalise(&self, typ : &Monotype) -> Polytype {
-        let quants = diff(typ.free_variables(), self.free_variables());
+    // Generalise free variables (that aren't free in the context) by renaming
+    // each to a fresh, unique name. The fresh names come from the monotonic
+    // type-variable counter, so a stored polytype's bound variables can never
+    // collide with type variables allocated by later statements — otherwise
+    // `context.apply` would silently corrupt already-generalised types.
+    pub fn generalise(&mut self, typ : &Monotype) -> Polytype {
+        let mut quants = diff(typ.free_variables(), self.free_variables());
+        quants.sort_unstable();
+        quants.dedup();
+        let mut sub = Substitution::new();
         let mut poly = Polytype::Mono(Box::new(typ.clone()));
         for q in quants {
-            poly = Polytype::TypeQuantifier(q, Box::new(poly));
+            let fresh_name = self.new_typevar();
+            sub.variables.insert(q.clone(), Monotype::var(fresh_name.clone()));
+            poly = Polytype::TypeQuantifier(fresh_name, Box::new(poly));
         }
-        poly
+        poly.apply(&sub)
     }
 }
 
@@ -489,7 +499,8 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
                     ctor = Monotype::func(vec![expanded, ctor]);
                 }
                 check_undeclared(&ctor, &fresh_names)?;
-                context.add(variant.n.clone(), context.generalise(&ctor));
+                let generalized = context.generalise(&ctor);
+                context.add(variant.n.clone(), generalized);
             }
         },
         TypeDec::Alias(rhs) => {
@@ -554,7 +565,8 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                 Some(poly) => context.add(name.clone(), poly),
                 None => context.remove(name),
             }
-            context.add(name.clone(), context.generalise(&t1.apply(&s_rec)));
+            let generalized = context.generalise(&t1.apply(&s_rec));
+            context.add(name.clone(), generalized);
             let (s2, t2) = algo_w(context, exp2)?;
             Ok((combined.combine(s2), t2))
         }
@@ -594,7 +606,8 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                             None => context.remove(&var_name),
                         }
                         let resolved = binding_type.apply(&combined);
-                        context.add(var_name, context.generalise(&resolved));
+                        let generalized = context.generalise(&resolved);
+                        context.add(var_name, generalized);
                     },
                     SNode::Expr(e1) => {
                         let (s1, _) = algo_w(context, e1)?;
@@ -621,7 +634,7 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
         ENode::List(exps) => {
             if exps.is_empty() {
                 let tv = Monotype::var(context.new_typevar());
-                Ok((Substitution::new(), Monotype::list(vec![tv])))
+                Ok((Substitution::new(), Monotype::list(tv)))
             } else {
                 let (s0, t0) = algo_w(context, &exps[0])?;
                 *context = context.apply(&s0);
@@ -635,7 +648,7 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                     combined = combined.combine(s_u.clone());
                     elem_type = elem_type.apply(&s_u);
                 }
-                Ok((combined, Monotype::list(vec![elem_type])))
+                Ok((combined, Monotype::list(elem_type)))
             }
         },
         ENode::Cons(e1, e2) => {
@@ -643,45 +656,32 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             *context = context.apply(&s1);
             let (s2, t2) = algo_w(context, e2)?;
             let elem = t1.apply(&s2);
-            let s3 = unify(&t2, &Monotype::list(vec![elem.clone()]))?;
-            let result = Monotype::list(vec![elem.apply(&s3)]);
+            let s3 = unify(&t2, &Monotype::list(elem.clone()))?;
+            let result = Monotype::list(elem.apply(&s3));
             Ok((s1.combine(s2).combine(s3), result))
         },
-        ENode::Match(scrutinee, cases) => {
-            // TODO: implement `match` type inference (HM).
-            //
-            // Algorithm:
-            //   1. Type the scrutinee:  (s0, t0) = algo_w(context, scrutinee);
-            //      *context = context.apply(&s0);
-            //   2. Fresh result typevar:  let ret = Monotype::var(context.new_typevar());
-            //   3. For each case:
-            //        - the pattern (case.val) type must unify with `t0`,
-            //        - the pattern's variables become bindings visible in case.exp,
-            //        - the body (case.exp) type must unify with `ret`.
-            //   4. Combine all substitutions; return (combined, ret).
-            //
-            // Pointers:
-            //   - Patterns are `ConsExpr` nodes: Variable | Cons (`x :: xs`) |
-            //     Application (enum constructor, e.g. `Some y`) | Literal. A helper
-            //     `type_pattern(&mut ctx, &case.val, &t0) -> Result<Substitution,
-            //     UnificationError>` that adds each pattern variable to `ctx` is the
-            //     clean split, since patterns bind vars that the body must see.
-            //   - Variable pattern: unify the scrutinee type with a fresh var, then
-            //     bind the name to it (Polytype::Mono). Generalise (context.generalise)
-            //     if you want polymorphic pattern vars.
-            //   - `x :: xs` (ENode::Cons): unify with Monotype::list(vec![elem]);
-            //     bind x : elem, xs : list elem, recursing into sub-patterns.
-            //   - Enum constructor (ENode::Application(f, args)): Monotype::enum_app(...)
-            //     or type_to_typefn; bind each field to a fresh var and recurse.
-            //   - Literal pattern: unify the literal's type with the scrutinee type.
-            //   - TypeContext is Clone (types.rs:290): `let mut case_ctx =
-            //     context.clone();` per case so pattern bindings never leak across
-            //     cases. The Abstraction/Block arms show the add/restore idiom as an
-            //     alternative to cloning.
-            //   - Return type consistency = every body's type unified with the shared
-            //     `ret` typevar; scrutinee type consistency = every pattern unified
-            //     with the same `t0`.
-            todo!("ENode::Match type inference")
+        ENode::Match(e, cases) => {
+            let (s0, t0) = algo_w(context, e)?;
+            *context = context.apply(&s0);
+            let mut match_t = t0;
+            let mut combined = s0;
+            let ret = Monotype::var(context.new_typevar());
+            for MatchCase { val: e1, exp: e2 } in cases {
+                let mut case_ctx = context.apply(&combined);
+                let s1 = type_pattern(&mut case_ctx, e1, &match_t)?;
+                combined = combined.combine(s1);
+                let (s2, t2) = algo_w(&mut case_ctx, e2)?;
+                combined = combined.combine(s2);
+                // case_ctx is a clone with its own type-var counter; vars
+                // allocated there leak into `combined`/`match_t`, so pull the
+                // counter back up to keep fresh names globally unique.
+                context.type_var_ctr = context.type_var_ctr.max(case_ctx.type_var_ctr);
+                let s_u = unify(&ret.apply(&combined), &t2.apply(&combined))?;
+                combined = combined.combine(s_u);
+                match_t = match_t.apply(&combined);
+            }
+            let resolved_ret = ret.apply(&combined);
+            Ok((combined, resolved_ret))
         },
         ENode::Arithmetic(op, e1, e2) => {
             let (s1, t1) = algo_w(context, e1)?;
@@ -715,10 +715,8 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             if !matches!(unified, Monotype::TypeVariable(_)) {
                 match op {
                     CompOp::Eq | CompOp::NotEq => {
-                        if let Monotype::TypeFuncApplication(f, _) = &unified {
-                            if **f == TypeFunc::Fn {
-                                return Err(UnificationError { message: "Cannot compare function types".to_string() });
-                            }
+                        if let Monotype::TypeFuncApplication(f, _) = &unified && **f == TypeFunc::Fn {
+                            return Err(UnificationError { message: "Cannot compare function types".to_string() });
                         }
                         let op_name = if *op == CompOp::Eq { "==" } else { "!=" };
                         unify(&unified, &Monotype::int())
@@ -781,6 +779,77 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
     }
 }
 
+pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Result<Substitution,UnificationError> {
+    match &*expr.e {
+        ENode::Literal(_) => Ok(Substitution::new()),
+        ENode::Variable(name) => {
+            context.add(name.clone(), Polytype::Mono(Box::new(typ.clone())));
+            Ok(Substitution::new())
+        },
+        ENode::Cons(hd, tl) => {
+            let alpha = Monotype::var(context.new_typevar());
+            let s0 = unify(typ, &Monotype::list(alpha.clone()))?;
+            *context = context.apply(&s0);
+            let elem = alpha.apply(&s0);
+            let s1 = type_pattern(context, hd, &elem)?;
+            let s2 = type_pattern(context, tl, &Monotype::list(elem.apply(&s1)))?;
+            Ok(s0.combine(s1).combine(s2))
+        },
+        ENode::Application(f, arg) => {
+            let mut args = vec![arg];
+            let mut head = f;
+            loop {
+                match &*head.e {
+                    ENode::Application(f2, a2) => {
+                        args.push(a2);
+                        head = f2;
+                    },
+                    ENode::Variable(name) => {
+                        let poly = context.get(name).ok_or_else(||
+                            UnificationError { message: format!("Undefined constructor {}", name) })?;
+                        let mut ctor = poly.instantiate(context, None);
+                        let mut combined = Substitution::new();
+                        for a in args.iter().rev() {
+                            if let Monotype::TypeFuncApplication(typ_fn, ts) = &ctor
+                                && **typ_fn == TypeFunc::Fn && ts.len() == 2 {
+                                    let field = ts[0].clone();
+                                    let rest = ts[1].clone();
+                                    let s = type_pattern(context, a, &field.apply(&combined))?;
+                                    *context = context.apply(&s);
+                                    combined = combined.combine(s);
+                                    ctor = rest.apply(&combined);
+                                    continue;
+                            }
+                            return Err(UnificationError {
+                                message: format!("Constructor `{}` applied to too many arguments", name)
+                            });
+                        }
+                        let s_last = unify(typ, &ctor)?;
+                        return Ok(combined.combine(s_last));
+                    },
+                    _ => return Err(UnificationError {
+                        message: "Constructor pattern must be a constructor name applied to arguments".to_string()
+                    }),
+                }
+            }
+        },
+        ENode::List(exprs) => {
+            let alpha = Monotype::var(context.new_typevar());
+            let s0 = unify(typ, &Monotype::list(alpha.clone()))?;
+            *context = context.apply(&s0);
+            let elem = alpha.apply(&s0);
+            let mut combined = s0;
+            for e in exprs {
+                let s = type_pattern(context, e, &elem)?;
+                *context = context.apply(&s);
+                combined = combined.combine(s);
+            }
+            Ok(combined)
+        },
+        _ => Err(UnificationError { message: format!("Unsupported pattern {:?}", expr) }),
+    }
+}
+
 /*
 * Top-Down algo
 */
@@ -835,7 +904,8 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
                 Some(poly) => context.add(name.clone(), poly),
                 None => context.remove(name),
             }
-            context.add(name.clone(), context.generalise(&beta.apply(&combined)));
+            let generalized = context.generalise(&beta.apply(&combined));
+            context.add(name.clone(), generalized);
             let s2 = algo_m(context, exp2, &typ.apply(&combined))?;
             Ok(combined.combine(s2))
         },
@@ -871,7 +941,8 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
                             None => context.remove(&var_name),
                         }
                         let resolved = binding_type.apply(&combined);
-                        context.add(var_name, context.generalise(&resolved));
+                        let generalized = context.generalise(&resolved);
+                        context.add(var_name, generalized);
                     },
                     SNode::Expr(e1) => {
                         let beta = Monotype::var(context.new_typevar());
@@ -896,10 +967,10 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
         ENode::List(exps) => {
             if exps.is_empty() {
                 let tv = Monotype::var(context.new_typevar());
-                unify(&Monotype::list(vec![tv]), typ)
+                unify(&Monotype::list(tv), typ)
             } else {
                 let beta = Monotype::var(context.new_typevar());
-                let s0 = unify(&Monotype::list(vec![beta.clone()]), typ)?;
+                let s0 = unify(&Monotype::list(beta.clone()), typ)?;
                 *context = context.apply(&s0);
                 let mut combined = s0;
                 let mut elem_type = beta.apply(&combined);
@@ -914,12 +985,12 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
         },
         ENode::Cons(e1, e2) => {
             let beta = Monotype::var(context.new_typevar());
-            let s0 = unify(&Monotype::list(vec![beta.clone()]), typ)?;
+            let s0 = unify(&Monotype::list(beta.clone()), typ)?;
             *context = context.apply(&s0);
             let elem_type = beta.apply(&s0);
             let s1 = algo_m(context, e1, &elem_type)?;
             *context = context.apply(&s1);
-            let s2 = algo_m(context, e2, &Monotype::list(vec![elem_type.apply(&s1)]))?;
+            let s2 = algo_m(context, e2, &Monotype::list(elem_type.apply(&s1)))?;
             Ok(s0.combine(s1).combine(s2))
         },
         ENode::Match(scrutinee, cases) => {
@@ -1244,43 +1315,43 @@ mod tests {
 
     #[test]
     fn generalise_no_vars_in_type() {
-        let ctx = TypeContext::make(ctx_map(vec![("x", mono(int()))]));
+        let mut ctx = TypeContext::make(ctx_map(vec![("x", mono(int()))]));
         assert_eq!(ctx.generalise(&int()), mono(int()));
     }
 
     #[test]
     fn generalise_single_var_not_in_context() {
-        let ctx = TypeContext::new();
-        assert_eq!(ctx.generalise(&var("a")), forall("a", mono(var("a"))));
+        let mut ctx = TypeContext::new();
+        assert_eq!(ctx.generalise(&var("a")), forall("t0", mono(var("t0"))));
     }
 
     #[test]
     fn generalise_single_var_in_context() {
-        let ctx = TypeContext::make(ctx_map(vec![("x", mono(fn_type(var("a"), int())))]));
+        let mut ctx = TypeContext::make(ctx_map(vec![("x", mono(fn_type(var("a"), int())))]));
         assert_eq!(ctx.generalise(&var("a")), mono(var("a")));
     }
 
     #[test]
     fn generalise_fn_some_vars_in_context() {
-        let ctx = TypeContext::make(ctx_map(vec![("x", mono(fn_type(var("a"), int())))]));
+        let mut ctx = TypeContext::make(ctx_map(vec![("x", mono(fn_type(var("a"), int())))]));
         assert_eq!(
             ctx.generalise(&fn_type(var("a"), var("b"))),
-            forall("b", mono(fn_type(var("a"), var("b"))))
+            forall("t0", mono(fn_type(var("a"), var("t0"))))
         );
     }
 
     #[test]
     fn generalise_fn_no_vars_in_context() {
-        let ctx = TypeContext::new();
+        let mut ctx = TypeContext::new();
         assert_eq!(
             ctx.generalise(&fn_type(var("a"), var("b"))),
-            forall("b", forall("a", mono(fn_type(var("a"), var("b")))))
+            forall("t1", forall("t0", mono(fn_type(var("t0"), var("t1")))))
         );
     }
 
     #[test]
     fn generalise_fn_all_vars_in_context() {
-        let ctx = TypeContext::make(ctx_map(vec![
+        let mut ctx = TypeContext::make(ctx_map(vec![
             ("x", mono(fn_type(var("a"), var("b")))),
         ]));
         assert_eq!(
@@ -1491,7 +1562,7 @@ mod tests {
         let result = algo_w(&mut ctx, &list(vec![lit(Lit::Int(1)), lit(Lit::Int(2))]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
-        assert_eq!(typ, Monotype::list(vec![Monotype::int()]));
+        assert_eq!(typ, Monotype::list(Monotype::int()));
     }
 
     #[test]
@@ -1500,7 +1571,7 @@ mod tests {
         let result = algo_w(&mut ctx, &list(vec![lit(Lit::Bool(true)), lit(Lit::Bool(false))]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
-        assert_eq!(typ, Monotype::list(vec![Monotype::bool()]));
+        assert_eq!(typ, Monotype::list(Monotype::bool()));
     }
 
     #[test]
@@ -1516,7 +1587,7 @@ mod tests {
         let result = algo_w(&mut ctx, &list(vec![lit(Lit::Float(3.14))]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
-        assert_eq!(typ, Monotype::list(vec![Monotype::float()]));
+        assert_eq!(typ, Monotype::list(Monotype::float()));
     }
 
     #[test]
@@ -1525,7 +1596,7 @@ mod tests {
         let result = algo_w(&mut ctx, &cons(lit(Lit::Int(1)), list(vec![])));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
-        assert_eq!(typ, Monotype::list(vec![Monotype::int()]));
+        assert_eq!(typ, Monotype::list(Monotype::int()));
     }
 
     #[test]
@@ -1534,7 +1605,7 @@ mod tests {
         let result = algo_w(&mut ctx, &cons(lit(Lit::Int(1)), cons(lit(Lit::Int(2)), list(vec![]))));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
-        assert_eq!(typ, Monotype::list(vec![Monotype::int()]));
+        assert_eq!(typ, Monotype::list(Monotype::int()));
     }
 
     #[test]
@@ -1558,7 +1629,7 @@ mod tests {
         let result = algo_w(&mut ctx, &cons(v("x"), list(vec![])));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
-        assert_eq!(typ, Monotype::list(vec![var("a")]));
+        assert_eq!(typ, Monotype::list(var("a")));
     }
 
     #[test]
@@ -1568,7 +1639,7 @@ mod tests {
         let result = algo_w(&mut ctx, &list(vec![v("x"), v("x")]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
-        assert_eq!(typ, Monotype::list(vec![Monotype::int()]));
+        assert_eq!(typ, Monotype::list(Monotype::int()));
     }
 
     #[test]
@@ -1798,7 +1869,7 @@ mod tests {
     #[test]
     fn m_list_empty_matches() {
         let mut ctx = TypeContext::new();
-        let result = algo_m(&mut ctx, &list(vec![]), &Monotype::list(vec![Monotype::int()]));
+        let result = algo_m(&mut ctx, &list(vec![]), &Monotype::list(Monotype::int()));
         assert!(result.is_ok());
     }
 
@@ -1819,7 +1890,7 @@ mod tests {
         let result = algo_m(
             &mut ctx,
             &list(vec![lit(Lit::Int(1)), lit(Lit::Int(2))]),
-            &Monotype::list(vec![Monotype::int()]),
+            &Monotype::list(Monotype::int()),
         );
         assert!(result.is_ok());
     }
@@ -1830,7 +1901,7 @@ mod tests {
         let result = algo_m(
             &mut ctx,
             &list(vec![lit(Lit::Int(1)), lit(Lit::Bool(true))]),
-            &Monotype::list(vec![Monotype::int()]),
+            &Monotype::list(Monotype::int()),
         );
         assert!(result.is_err());
     }
@@ -1848,7 +1919,7 @@ mod tests {
         let result = algo_m(
             &mut ctx,
             &list(vec![lit(Lit::Bool(true)), lit(Lit::Bool(false))]),
-            &Monotype::list(vec![Monotype::bool()]),
+            &Monotype::list(Monotype::bool()),
         );
         assert!(result.is_ok());
     }
@@ -1857,7 +1928,7 @@ mod tests {
     fn m_list_refines_elem_var() {
         let mut ctx = TypeContext::new();
         let tv = Monotype::var("a".to_string());
-        let list_tv = Monotype::list(vec![tv.clone()]);
+        let list_tv = Monotype::list(tv.clone());
         let result = algo_m(&mut ctx, &list(vec![lit(Lit::Int(42))]), &list_tv);
         assert!(result.is_ok());
         let sub = result.unwrap();
@@ -1867,14 +1938,14 @@ mod tests {
     #[test]
     fn m_cons_matches() {
         let mut ctx = TypeContext::new();
-        let result = algo_m(&mut ctx, &cons(lit(Lit::Int(1)), list(vec![])), &Monotype::list(vec![Monotype::int()]));
+        let result = algo_m(&mut ctx, &cons(lit(Lit::Int(1)), list(vec![])), &Monotype::list(Monotype::int()));
         assert!(result.is_ok());
     }
 
     #[test]
     fn m_cons_mismatch() {
         let mut ctx = TypeContext::new();
-        let result = algo_m(&mut ctx, &cons(lit(Lit::Int(1)), list(vec![])), &Monotype::list(vec![Monotype::bool()]));
+        let result = algo_m(&mut ctx, &cons(lit(Lit::Int(1)), list(vec![])), &Monotype::list(Monotype::bool()));
         assert!(result.is_err());
     }
 
@@ -1882,7 +1953,7 @@ mod tests {
     fn m_cons_refines_elem_var() {
         let mut ctx = TypeContext::new();
         let tv = Monotype::var("a".to_string());
-        let list_tv = Monotype::list(vec![tv.clone()]);
+        let list_tv = Monotype::list(tv.clone());
         let result = algo_m(&mut ctx, &cons(lit(Lit::Int(42)), list(vec![])), &list_tv);
         assert!(result.is_ok());
         let sub = result.unwrap();

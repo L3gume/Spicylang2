@@ -20,7 +20,7 @@ TypeBase: Box<Type> = {
     BuiltinType                 => <>,
     AppType                     => <>,
     TypeVar                     => Box::new(Type { t: Monotype::var(<>) }),
-    "list" <t:TypeBase>         => Box::new(Type { t: Monotype::list(vec![t.t]) }),
+    "list" <t:TypeBase>         => Box::new(Type { t: Monotype::list(t.t) }),
     "(" <t:Type> ")"            => t,
 };
 
@@ -113,20 +113,23 @@ ConsExpr: Box<Expr> = {
 ConsOperand: Box<Expr> = {
     UnaryExpr                                           => <>,
     "{" <ss:BlkBody> <e:Expr> "}"                       => Box::new(Expr::from(ENode::Block(ss, e))),
-    "[" "]"                                             => Box::new(Expr::from(ENode::List(vec![]))),
-    "[" <es:CommaOne<Expr>> "]"                         => Box::new(Expr::from(ENode::List(es.into_iter().map(|b| *b).collect()))),
 };
 
 ExprBase: Box<Expr> = {
     LogExpr                                             => <>,
     "{" <ss:BlkBody> <e:Expr> "}"                       => Box::new(Expr::from(ENode::Block(ss, e))),
-    "[" "]"                                             => Box::new(Expr::from(ENode::List(vec![]))),
-    "[" <es:CommaOne<Expr>> "]"                         => Box::new(Expr::from(ENode::List(es.into_iter().map(|b| *b).collect()))),
 };
 
-// TODO: function currying (multiple binders)
+// Multi-binder sugar: `\x y z => body` desugars to `\x => \y => \z => body`.
+// Explicit nested abstractions still parse (body is a full Expr).
 Abs_Expr: Box<Expr> = {
-    "\\" <b:Binding> "=>" <t:Expr>                      => Box::new(Expr::from(ENode::Abstraction(b, t))),
+    "\\" <mut bs:Binding+> "=>" <t:Expr> => {
+        let mut e = t;
+        while let Some(b) = bs.pop() {
+            e = Box::new(Expr::from(ENode::Abstraction(b, e)));
+        }
+        e
+    }
 }
 
 // --- Lowest precedence: logical (||, &&, ^) ---
@@ -179,6 +182,8 @@ AppExpr: Box<Expr> = {
 Atom: Box<Expr> = {
     Name                        => Box::new(Expr::from(ENode::Variable(<>))),
     Literal                     => Box::new(Expr::from(ENode::Literal(<>))),
+    "[" "]"                     => Box::new(Expr::from(ENode::List(vec![]))),
+    "[" <es:CommaOne<Expr>> "]" => Box::new(Expr::from(ENode::List(es.into_iter().map(|b| *b).collect()))),
     "(" <e:Expr> ")"            => e
 };
 
