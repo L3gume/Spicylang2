@@ -1,5 +1,16 @@
 
-enum option('a) =
+enum Option('a) =
     Some('a)
-    | none
+    | None;
+
+enum Result('a, 'b) =
+    Ok('a)
+    | Err('b);
+
+let get_opt = \x => Some x;
+
+let get_res = \opt => match opt
+    | Some val  => Ok val
+    | None      => Err "No value found"
+    ;
 

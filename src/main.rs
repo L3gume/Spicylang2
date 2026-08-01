@@ -9,9 +9,74 @@ mod types;
 lalrpop_mod!(pub grammar);
 
 fn main() {
-    let mut ctx = types::TypeContext::new();
-    let mut buffer = String::new();
+    let mut dump_ast = false;
+    let mut start_repl = false;
+    let mut file: Option<String> = None;
+
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--ast" => dump_ast = true,
+            "--repl" => start_repl = true,
+            "--help" | "-h" => {
+                println!("usage: spicylang [--ast] [--repl] <file.spcy>");
+                println!("  --ast    dump the program's AST after it completes");
+                println!("  --repl   start the REPL with the program already in the context");
+                return;
+            }
+            s if s.starts_with('-') => {
+                eprintln!("error: unknown option `{}`", s);
+                eprintln!("usage: spicylang [--ast] [--repl] <file.spcy>");
+                process::exit(1);
+            }
+            s => file = Some(s.to_string()),
+        }
+    }
+
+    match file {
+        // No program given: start the REPL with an empty context.
+        None => repl_loop(types::TypeContext::new()),
+        Some(path) => {
+            let source = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: failed to read `{}`: {}", path, e);
+                    process::exit(1);
+                }
+            };
+
+            // Step 1: parse
+            let mut prog = match Program::parse(&source) {
+                Ok(p) => {
+                    println!("parse: ok");
+                    p
+                }
+                Err(e) => {
+                    eprintln!("parse: error: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            // Step 2: typecheck
+            if let Err(e) = Program::typecheck(&mut prog) {
+                eprintln!("typecheck: error: {}", e);
+                process::exit(2);
+            }
+            println!("typecheck: ok");
+
+            if dump_ast {
+                println!("{:#?}", *prog);
+            }
+
+            if start_repl {
+                repl_loop(prog.ctx.clone());
+            }
+        }
+    }
+}
+
+fn repl_loop(mut ctx: types::TypeContext) {
     let stdin = io::stdin();
+    let mut buffer = String::new();
 
     loop {
         print!("> ");
@@ -50,4 +115,3 @@ fn main() {
         }
     }
 }
-

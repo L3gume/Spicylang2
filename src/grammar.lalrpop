@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 grammar;
 
+// TODO: Investigate better parser with comments and location info on AST node for better error messages
 //match {
 //    r"\s+" => { }, // Skip whitespace (disables default behavior if custom ignore patterns are present)
 //    r"#[^\n\r]*[\n\r]*" => { }, // Skip single-line // comments
@@ -29,10 +30,23 @@ TypeBase: Box<Type> = {
     "(" <t:Type> ")"            => t,
 };
 
+// Enum applications: `Name t1 t2 ... tn` (space-separated), greedy and
+// left-associative, mirroring AppExpr in the expression grammar. An application
+// operand (AppArg) sits one level below AppType so the greedy application stays
+// LALR(1)-parseable: a `Name` operand is a bare constructor, so nesting an
+// application requires parens: `option (maybe int)`.
 AppType: Box<Type> = {
     Name                                    => Box::new(Type { t: Monotype::enum_type(<>) }),
-    <n:Name> "(" <ts:CommaOne<Type>> ")"    => Box::new(Type { t: Monotype::enum_app(n, ts.into_iter().map(|b| b.t).collect()) })
+    <t1:AppType> <t2:AppArg>                => Box::new(Type { t: Monotype::enum_apply(t1.t, t2.t) }),
 }
+
+AppArg: Box<Type> = {
+    BuiltinType                 => <>,
+    Name                        => Box::new(Type { t: Monotype::enum_type(<>) }),
+    TypeVar                     => Box::new(Type { t: Monotype::var(<>) }),
+    "list" <t:AppArg>           => Box::new(Type { t: Monotype::list(t.t) }),
+    "(" <t:Type> ")"            => t,
+};
 
 BuiltinType: Box<Type> = {
     "int"       => Box::new(Type { t: Monotype::int() }),

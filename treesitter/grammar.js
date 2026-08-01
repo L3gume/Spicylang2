@@ -159,13 +159,22 @@ export default grammar({
       '()',
     ),
 
-    // AppType: Name | Name "(" CommaOne<Type> ")"
+    // AppType: Name | AppType AppArg   (greedy, left-associative)
     app_type: $ => choice(
-      seq(
-        field('name', $.identifier),
-        '(', comma_one($, $._type), ')',
-      ),
       $.identifier,
+      prec.left(PREC.APP, seq(
+        field('constructor', $.app_type),
+        field('arg', $.type_arg),
+      )),
+    ),
+
+    // AppArg: BuiltinType | Name | TypeVar | "list" AppArg | "(" Type ")"
+    type_arg: $ => choice(
+      $.builtin_type,
+      $.identifier,
+      $.type_var,
+      seq('list', $.type_arg),
+      $.parenthesized_type,
     ),
 
     list_type: $ => seq('list', $._type_base),

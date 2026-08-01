@@ -217,6 +217,16 @@ impl Monotype {
     pub fn enum_app(name : String, vars : Vec<Monotype>) -> Monotype {
         Monotype::TypeFuncApplication(Box::new(TypeFunc::Enum(name)), vars)
     }
+
+    pub fn enum_apply(typ : Monotype, arg : Monotype) -> Monotype {
+        match typ {
+            Monotype::TypeFuncApplication(f, mut args) => {
+                args.push(arg);
+                Monotype::TypeFuncApplication(f, args)
+            }
+            _ => panic!("enum_apply: expected an enum application"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

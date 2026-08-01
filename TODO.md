@@ -14,6 +14,7 @@
     - [ ] Location info in AST
     - [ ] Better error messages in parse and typecheck
     - [ ] Support comments
+- [ ] Pretty-printing of type and AST nodes
 - [x] User-defined enumeration types
 - [ ] User-defined structure types
 - [x] Pattern Matching on expressions

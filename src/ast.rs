@@ -532,6 +532,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lambda_with_enum_type_annotation() {
+        let p = parse("\\(x : option int) => x;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Abstraction(
+                Box::new(Binding(
+                    "x".to_string(),
+                    mono(Monotype::enum_app("option".to_string(), vec![Monotype::int()])),
+                )),
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn lambda_with_multi_arg_enum_type_annotation() {
+        let p = parse("\\(x : result int bool) => x;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Abstraction(
+                Box::new(Binding(
+                    "x".to_string(),
+                    mono(Monotype::enum_app(
+                        "result".to_string(),
+                        vec![Monotype::int(), Monotype::bool()],
+                    )),
+                )),
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
+        );
+    }
+
+    #[test]
+    fn lambda_with_parenthesized_enum_type_annotation() {
+        let p = parse("\\(x : option (list int)) => x;");
+        assert_eq!(
+            &*first(&p).s,
+            &SNode::Expr(Box::new(Expr::from(ENode::Abstraction(
+                Box::new(Binding(
+                    "x".to_string(),
+                    mono(Monotype::enum_app(
+                        "option".to_string(),
+                        vec![Monotype::list(Monotype::int())],
+                    )),
+                )),
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
+        );
+    }
+
     // ---- Let-in expression ----
 
     #[test]

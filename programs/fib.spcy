@@ -1,6 +1,4 @@
-# Example fibonacci sequence program
 
-# Block expressions similar to Rust
 let fib = \(n : int) =>
     if n > 1 then
     {
@@ -11,14 +9,12 @@ let fib = \(n : int) =>
     else
         1;
 
-# regular function applications in binary expression
 let fib2 = \(n : int) =>
     if n > 1 then
         fib2 (n - 1) + fib (n - 2)
     else
         1;
 
-# let-bindings
 let fib3 = \(n : int) =>
     if n > 1 then
         let f1 = fib3 n - 1 in
@@ -27,7 +23,6 @@ let fib3 = \(n : int) =>
     else
         1;
 
-# match expression
 let fib4 = \(n : int) => match n
     | 0 => 1
     | 1 => 1

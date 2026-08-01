@@ -45,7 +45,10 @@
 (type_var) @type.parameter
 
 (app_type
-  name: (identifier) @type)
+  (identifier) @type)
+
+(type_arg
+  (identifier) @type)
 
 (type_header
   name: (identifier) @type.definition)
