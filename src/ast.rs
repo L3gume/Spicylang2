@@ -157,8 +157,8 @@ impl Expr {
 
 #[derive(Debug, PartialEq)]
 pub struct MatchCase {
-    v : Box<Expr>,
-    e : Box<Expr>
+    pub val : Box<Expr>,
+    pub exp : Box<Expr>
 }
 
 #[derive(Debug, Clone, PartialEq)]

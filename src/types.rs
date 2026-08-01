@@ -647,6 +647,42 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             let result = Monotype::list(vec![elem.apply(&s3)]);
             Ok((s1.combine(s2).combine(s3), result))
         },
+        ENode::Match(scrutinee, cases) => {
+            // TODO: implement `match` type inference (HM).
+            //
+            // Algorithm:
+            //   1. Type the scrutinee:  (s0, t0) = algo_w(context, scrutinee);
+            //      *context = context.apply(&s0);
+            //   2. Fresh result typevar:  let ret = Monotype::var(context.new_typevar());
+            //   3. For each case:
+            //        - the pattern (case.val) type must unify with `t0`,
+            //        - the pattern's variables become bindings visible in case.exp,
+            //        - the body (case.exp) type must unify with `ret`.
+            //   4. Combine all substitutions; return (combined, ret).
+            //
+            // Pointers:
+            //   - Patterns are `ConsExpr` nodes: Variable | Cons (`x :: xs`) |
+            //     Application (enum constructor, e.g. `Some y`) | Literal. A helper
+            //     `type_pattern(&mut ctx, &case.val, &t0) -> Result<Substitution,
+            //     UnificationError>` that adds each pattern variable to `ctx` is the
+            //     clean split, since patterns bind vars that the body must see.
+            //   - Variable pattern: unify the scrutinee type with a fresh var, then
+            //     bind the name to it (Polytype::Mono). Generalise (context.generalise)
+            //     if you want polymorphic pattern vars.
+            //   - `x :: xs` (ENode::Cons): unify with Monotype::list(vec![elem]);
+            //     bind x : elem, xs : list elem, recursing into sub-patterns.
+            //   - Enum constructor (ENode::Application(f, args)): Monotype::enum_app(...)
+            //     or type_to_typefn; bind each field to a fresh var and recurse.
+            //   - Literal pattern: unify the literal's type with the scrutinee type.
+            //   - TypeContext is Clone (types.rs:290): `let mut case_ctx =
+            //     context.clone();` per case so pattern bindings never leak across
+            //     cases. The Abstraction/Block arms show the add/restore idiom as an
+            //     alternative to cloning.
+            //   - Return type consistency = every body's type unified with the shared
+            //     `ret` typevar; scrutinee type consistency = every pattern unified
+            //     with the same `t0`.
+            todo!("ENode::Match type inference")
+        },
         ENode::Arithmetic(op, e1, e2) => {
             let (s1, t1) = algo_w(context, e1)?;
             *context = context.apply(&s1);
@@ -885,6 +921,23 @@ pub fn algo_m(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Resu
             *context = context.apply(&s1);
             let s2 = algo_m(context, e2, &Monotype::list(vec![elem_type.apply(&s1)]))?;
             Ok(s0.combine(s1).combine(s2))
+        },
+        ENode::Match(scrutinee, cases) => {
+            // TODO: implement `match` type checking (see the algo_w pointer comment).
+            //
+            // Algorithm:
+            //   1. Fresh scrutinee typevar:  let beta = Monotype::var(context.new_typevar());
+            //   2. Every pattern (case.val) must unify with `beta` -- the SAME
+            //      scrutinee type across all cases -- binding its variables into a
+            //      per-case cloned context (TypeContext: Clone, types.rs:290).
+            //   3. Every body (case.exp) is checked against the expected `typ`, i.e.
+            //      algo_m(&mut case_ctx, &case.exp, typ) -- this enforces the "all
+            //      arms share one return type" rule.
+            //   4. You may either check the scrutinee itself via
+            //      algo_m(context, scrutinee, &beta) or leave beta to be constrained
+            //      purely by the patterns; either way beta must end up resolved.
+            //   5. Return the combined substitution (s0.combine(s1).combine(...)).
+            todo!("ENode::Match type checking")
         },
         ENode::Arithmetic(op, e1, e2) => {
             let beta = Monotype::var(context.new_typevar());

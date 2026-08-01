@@ -97,12 +97,17 @@ pub Expr: Box<Expr> = {
     Abs_Expr                                            => <>,
     "let" <n:Name> "=" <e1:Expr> "in" <e2:Expr>         => Box::new(Expr::from(ENode::Let(n, e1, e2))),
     "if" <c:Expr> "then" <e1:Expr> "else" <e2:Expr>     => Box::new(Expr::from(ENode::IfElse(c, e1, e2))),
+    "match" <e:ConsExpr> "|" <cs:Pipe<MatchCase>>       => Box::new(Expr::from(ENode::Match(e, cs))),
     ConsExpr                                            => <>,
+};
+
+MatchCase: MatchCase = {
+    <v:ConsExpr> "=>" <e:ConsExpr>                      => MatchCase{ val: v, exp: e }
 };
 
 ConsExpr: Box<Expr> = {
     ExprBase                                            => <>,
-    <e1:ConsOperand> "::" <e2:Expr>                     => Box::new(Expr::from(ENode::Cons(e1, e2))),
+    <e1:ConsOperand> "::" <e2:ConsExpr>                 => Box::new(Expr::from(ENode::Cons(e1, e2))),
 };
 
 ConsOperand: Box<Expr> = {
@@ -118,7 +123,6 @@ ExprBase: Box<Expr> = {
     "[" "]"                                             => Box::new(Expr::from(ENode::List(vec![]))),
     "[" <es:CommaOne<Expr>> "]"                         => Box::new(Expr::from(ENode::List(es.into_iter().map(|b| *b).collect()))),
 };
-
 
 // TODO: function currying (multiple binders)
 Abs_Expr: Box<Expr> = {
