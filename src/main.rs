@@ -4,6 +4,7 @@ use lalrpop_util::lalrpop_mod;
 use ast::Program;
 
 mod ast;
+mod codegen;
 mod types;
 
 lalrpop_mod!(pub grammar);
@@ -63,6 +64,19 @@ fn main() {
             }
             println!("typecheck: ok");
 
+            // Step 3: codegen (MLIR). TODO: feed the module to the LLVM backend
+            // and JIT-compile it once codegen::lower is implemented.
+            match codegen::lower(&prog) {
+                Ok(module) => println!(
+                    "codegen: ok ({} top-level functions)",
+                    module.function_count()
+                ),
+                Err(e) => {
+                    eprintln!("codegen: error: {}", e);
+                    process::exit(3);
+                }
+            }
+
             if dump_ast {
                 println!("{:#?}", *prog);
             }
@@ -102,6 +116,10 @@ fn repl_loop(mut ctx: types::TypeContext) {
             Err(e) => eprintln!("parse error: {}", e),
             Ok(mut prog) => {
                 for stmt in prog.stmts.iter_mut() {
+                    // TODO(mlir): JIT-compile the statement instead of only
+                    // typechecking: codegen::lower on `stmt`, then
+                    // codegen::execute with melior's `ExecutionEngine`
+                    // (keep the Module alive across lines so bindings persist).
                     match stmt.typecheck(&ctx) {
                         Ok((sub, typ)) => {
                             ctx = stmt.ctx.clone();
