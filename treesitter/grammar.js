@@ -19,7 +19,7 @@ const PREC = {
   CONS: 7,
 };
 
-module.exports = grammar({
+export default grammar({
   name: 'spicylang',
 
   word: $ => $.identifier,

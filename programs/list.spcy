@@ -12,6 +12,13 @@ let map = \fn ls => match ls
     | x::xs => (fn x)::(map fn xs)
     ;
 
+let lfold = \fn acc ls => match ls
+    | [] => acc
+    | x::xs => lfold fn (fn acc x) ls
+    ;
+
 let add = \x y => x + y;
 
 let added = map (add 1) [1, 2, 3];
+
+let sum = lfold add 0 [1,2,3,4];

@@ -27,4 +27,11 @@ let fib3 = \(n : int) =>
     else
         1;
 
+# match expression
+let fib4 = \(n : int) => match n
+    | 0 => 1
+    | 1 => 1
+    | x => fib (x - 1) + fib (x - 2)
+    ;
+
 let fifth = fib 5;

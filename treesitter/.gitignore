@@ -37,9 +37,11 @@ zig-out/
 /examples/*/
 
 # Grammar volatiles
+src/
 *.wasm
 *.obj
 *.o
+parser/
 
 # Archives
 *.tar.gz

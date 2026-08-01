@@ -10,7 +10,8 @@
         "spicylang"
       ],
       "injection-regex": "^spicylang$",
-      "class-name": "TreeSitterSpicylang"
+      "class-name": "TreeSitterSpicylang",
+      "highlights": "queries/spicylang/highlights.scm"
     }
   ],
   "metadata": {

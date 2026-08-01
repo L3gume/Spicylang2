@@ -5,6 +5,11 @@ use std::str::FromStr;
 
 grammar;
 
+//match {
+//    r"\s+" => { }, // Skip whitespace (disables default behavior if custom ignore patterns are present)
+//    r"#[^\n\r]*[\n\r]*" => { }, // Skip single-line // comments
+//}
+
 pub Prog: Box<Program> = <ss:SemiCol<Stmt>> => Box::new(Program { stmts : ss, ctx : TypeContext::new() });
 
 // ----------------------------------------------------------------------------
