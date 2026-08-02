@@ -4,18 +4,15 @@ let iter = \fn ls => match ls
     | x::xs => {
         let unit = fn x;
         iter fn xs
-    }
-    ;
+    };
 
 let map = \fn ls => match ls
     | [] => []
-    | x::xs => (fn x)::(map fn xs)
-    ;
+    | x::xs => (fn x)::(map fn xs);
 
 let lfold = \fn acc ls => match ls
     | [] => acc
-    | x::xs => lfold fn (fn acc x) ls
-    ;
+    | x::xs => lfold fn (fn acc x) ls;
 
 let add = \x y => x + y;
 

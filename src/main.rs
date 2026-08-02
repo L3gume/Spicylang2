@@ -11,12 +11,14 @@ lalrpop_mod!(pub grammar);
 
 fn main() {
     let mut dump_ast = false;
+    let mut dump_mlir = false;
     let mut start_repl = false;
     let mut file: Option<String> = None;
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--ast" => dump_ast = true,
+            "--mlir" => dump_mlir = true,
             "--repl" => start_repl = true,
             "--help" | "-h" => {
                 println!("usage: spicylang [--ast] [--repl] <file.spcy>");
@@ -67,10 +69,16 @@ fn main() {
             // Step 3: codegen (MLIR). TODO: feed the module to the LLVM backend
             // and JIT-compile it once codegen::lower is implemented.
             match codegen::lower(&prog) {
-                Ok(module) => println!(
-                    "codegen: ok ({} top-level functions)",
-                    module.function_count()
-                ),
+                Ok(module) => {
+                    println!(
+                        "codegen: ok ({} top-level functions)",
+                        module.function_count()
+                    );
+                    if dump_mlir {
+                        println!("{}", module.dump());
+                    }
+                    // TODO: actual compilation
+                },
                 Err(e) => {
                     eprintln!("codegen: error: {}", e);
                     process::exit(3);
