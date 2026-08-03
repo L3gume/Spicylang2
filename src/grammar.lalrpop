@@ -6,10 +6,11 @@ use std::str::FromStr;
 grammar;
 
 // TODO: Investigate better parser with comments and location info on AST node for better error messages
-//match {
-//    r"\s+" => { }, // Skip whitespace (disables default behavior if custom ignore patterns are present)
-//    r"#[^\n\r]*[\n\r]*" => { }, // Skip single-line // comments
-//}
+match {
+    r"\s+" => { }, // Skip whitespace (disables default behavior if custom ignore patterns are present)
+    r"#[^\n\r]*[\n\r]*" => { }, // Skip single-line // comments
+    _, // Catch-all: identity-map any terminal literals used in the grammar
+}
 
 pub Prog: Box<Program> = <ss:SemiCol<Stmt>> => Box::new(Program { stmts : ss, ctx : TypeContext::new() });
 
