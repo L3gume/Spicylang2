@@ -65,13 +65,17 @@ fn main() {
 
             let context = codegen::new_context();
             match codegen::lower(&prog, &context) {
-                Ok(module) => {
+                Ok(mut module) => {
                     println!(
                         "codegen: ok ({} top-level functions)",
                         module.function_count()
                     );
                     if dump_mlir {
                         println!("{}", module.dump());
+                    }
+
+                    if !start_repl {
+                        compile_executable(&path, &mut module);
                     }
                 },
                 Err(e) => {
@@ -87,6 +91,39 @@ fn main() {
             if start_repl {
                 repl_loop(Some(prog));
             }
+        }
+    }
+}
+
+/// Emit a native object file and link it into an executable named after the
+/// source file (with the `.spcy` extension stripped).
+fn compile_executable(source_path: &str, module: &mut codegen::Module) {
+    let output_path = std::path::Path::new(source_path).with_extension("");
+    let obj_path = std::env::temp_dir().join(format!("spicylang_{}.o", process::id()));
+
+    if let Err(e) = codegen::compile(module, obj_path.to_str().unwrap()) {
+        eprintln!("codegen: error: {}", e);
+        process::exit(3);
+    }
+
+    let link = process::Command::new("cc")
+        .arg("-o")
+        .arg(&output_path)
+        .arg(&obj_path)
+        .status();
+    let _ = std::fs::remove_file(&obj_path);
+
+    match link {
+        Ok(status) if status.success() => {
+            println!("compiled: {}", output_path.display());
+        }
+        Ok(_) => {
+            eprintln!("error: failed to link `{}`", output_path.display());
+            process::exit(3);
+        }
+        Err(e) => {
+            eprintln!("error: could not run `cc` to link the executable: {}", e);
+            process::exit(3);
         }
     }
 }
@@ -146,7 +183,8 @@ fn repl_loop(initial: Option<Box<Program>>) {
                             Some(stmt) => match &*stmt.s {
                                 ast::SNode::Expr(e) => (Some(e.typ.clone()), LastKind::Expr, None),
                                 ast::SNode::Decl(e1, _, e2) => {
-                                    if matches!(&*e2.e, ast::ENode::Abstraction(..)) {
+                                    let is_fn = matches!(&e2.typ, types::Monotype::TypeFuncApplication(f, _) if matches!(**f, types::TypeFunc::Fn));
+                                    if is_fn {
                                         (Some(e2.typ.clone()), LastKind::DeclFn, None)
                                     } else {
                                         let name = match &*e1.e {

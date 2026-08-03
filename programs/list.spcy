@@ -12,9 +12,11 @@ let map = \fn ls => match ls
 
 let lfold = \fn acc ls => match ls
     | [] => acc
-    | x::xs => lfold fn (fn acc x) ls;
+    | x::xs => lfold fn (fn acc x) xs;
 
 let add = \x y => x + y;
+
+let sum = lfold add 0;
 
 let fib = \(n : int) => match n
     | 0 => 1
@@ -29,3 +31,5 @@ let tl_fib = \(n : int) =>
         else
             loop (i+1) (b) (a+b)
     in loop 0 1 1;
+
+sum (map tl_fib [1,2,3,4,5]);

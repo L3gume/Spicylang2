@@ -10,7 +10,7 @@
 - [x] MLIR code generation
     - [ ] Make sense of this stuff
     - [ ] Actually compile and execute
-    - [ ] Make repl jit-compiled
+    - [x] Make repl jit-compiled
 - [ ] Better parser + lexer
     - [ ] Location info in AST
     - [ ] Better error messages in parse and typecheck
@@ -20,6 +20,7 @@
 - [ ] User-defined structure types
 - [x] Pattern Matching on expressions
 - [ ] Builtin type to string conversions for print
+    - support escape characters like '\n'
     - OCaml does str_of_xx for this, just applying 'str' to value is fine, type checker will simply return str type
     - Code gen will handle generating conversion code
 - [ ] Builtin List stuff

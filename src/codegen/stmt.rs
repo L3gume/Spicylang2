@@ -2,10 +2,10 @@
 
 use crate::ast::*;
 use crate::types::{Monotype, TypeFunc};
-use melior::dialect::func;
+use melior::dialect::{arith, func};
 use melior::ir::{
     Attribute,
-    attribute::{FlatSymbolRefAttribute, StringAttribute, TypeAttribute},
+    attribute::{FlatSymbolRefAttribute, IntegerAttribute, StringAttribute, TypeAttribute},
     operation::OperationBuilder,
     r#type::{FunctionType, IntegerType},
     Block, BlockLike, Identifier, Location, Region, RegionLike, Type, Value, ValueLike,
@@ -13,6 +13,7 @@ use melior::ir::{
 use std::collections::HashMap;
 
 use super::{AbstractionInfo, EnumLayout, Env, Module};
+use super::apply::default_free_vars;
 use super::expr::lower_expr;
 use super::types::lower_type;
 
@@ -233,7 +234,7 @@ pub fn lower_decl<'a>(
 
     if let ENode::Abstraction(binding, body) = &*e2.e {
         module.abstractions.insert(
-            name,
+            name.clone(),
             AbstractionInfo {
                 param: binding.0.clone(),
                 param_type: binding.1.t.clone(),
@@ -242,6 +243,16 @@ pub fn lower_decl<'a>(
             },
         );
         return Ok(());
+    }
+
+    // A function-valued application (e.g. `let sum = lfold add 0;`): keep the
+    // expression and inline it at use sites, so partial applications become
+    // full applications instead of first-class closure values.
+    if let ENode::Application(..) = &*e2.e {
+        if !super::apply::is_scalar_type(&e2.typ) {
+            module.inlineable.insert(name, e2.clone());
+            return Ok(());
+        }
     }
 
     let location = Location::unknown(module.context);
@@ -337,5 +348,87 @@ pub fn lower_type_decl<'a>(
             module.aliases.insert(header.n.clone(), rhs.t.clone());
         }
     }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Executable entry point
+// ----------------------------------------------------------------------------
+
+/// Add a C-callable `func.func @main() -> i32` that invokes `@__main` and
+/// maps its result to the process exit code (0 unless the program ends with
+/// an `int` expression, which is used directly).
+pub(crate) fn emit_main_wrapper<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
+    let block = Block::new(&[]);
+    let i32_type = IntegerType::new(module.context, 32).into();
+
+    let ret_mono = module.entry_return_monotype().cloned();
+    let is_int_exit = matches!(
+        ret_mono,
+        Some(ref m) if matches!(
+            default_free_vars(m),
+            Monotype::TypeFuncApplication(ref f, ref args)
+                if args.is_empty() && matches!(**f, TypeFunc::Int)
+        )
+    );
+
+    let ret_value: Value<'a, '_> = if is_int_exit {
+        let call = func::call(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, "__main"),
+            &[],
+            &[i32_type],
+            location,
+        );
+        block
+            .append_operation(call)
+            .result(0)
+            .map_err(|e| e.to_string())?
+            .into()
+    } else {
+        let outputs: Vec<Type<'a>> = match ret_mono {
+            Some(ref m) => vec![lower_type(&default_free_vars(m), module)?],
+            None => vec![],
+        };
+        let call = func::call(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, "__main"),
+            &[],
+            &outputs,
+            location,
+        );
+        block.append_operation(call);
+        let zero = arith::constant(
+            module.context,
+            IntegerAttribute::new(IntegerType::new(module.context, 32).into(), 0).into(),
+            location,
+        );
+        block
+            .append_operation(zero)
+            .result(0)
+            .map_err(|e| e.to_string())?
+            .into()
+    };
+
+    block.append_operation(func::r#return(&[ret_value], location));
+
+    let function_type = FunctionType::new(module.context, &[], &[i32_type]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "main"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[(
+            Identifier::new(module.context, "llvm.emit_c_interface"),
+            Attribute::unit(module.context),
+        )],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.functions += 1;
     Ok(())
 }

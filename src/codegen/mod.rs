@@ -22,7 +22,7 @@ mod lists;
 mod stmt;
 mod types;
 
-pub use execute::{ExecutionResult, execute};
+pub use execute::{ExecutionResult, compile, execute};
 pub use stmt::lower;
 
 use crate::ast::*;
@@ -126,11 +126,10 @@ pub struct Module<'a> {
     /// Cache of emitted specializations: `(binding name, canonical
     /// instantiation type) -> closure symbol`.
     specializations: HashMap<(String, String), String>,
-    /// Cache of emitted partial applications: `(binding name, argument
-    /// fingerprint, instantiation type) -> partial function symbol`. Keyed by
-    /// the argument so recursive partial applications (e.g. `map fn xs` inside
-    /// `map`) reuse the same function instead of re-lowering infinitely.
-    partials: HashMap<(String, String, String), String>,
+    /// Function-valued `let` bindings whose right-hand side is an application
+    /// (e.g. `let sum = lfold add 0;`), kept as expressions and inlined at
+    /// use sites rather than evaluated to a closure value eagerly.
+    inlineable: HashMap<String, Expr>,
     /// Number of specialization symbols emitted.
     spec_counter: usize,
     /// Number of let-bound abstractions registered, for unique registry names.
@@ -159,7 +158,7 @@ impl<'a> Module<'a> {
             closures: 0,
             abstractions: HashMap::new(),
             specializations: HashMap::new(),
-            partials: HashMap::new(),
+            inlineable: HashMap::new(),
             spec_counter: 0,
             let_counter: 0,
             constructors: HashMap::new(),

@@ -29,20 +29,32 @@ pub(crate) fn lower_type<'a>(typ: &Monotype, module: &Module<'a>) -> Result<Type
             TypeFunc::Enum(_) => Type::parse(module.context, "!llvm.ptr")
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string()),
         },
+        // Curried function types lower to a single flat `FunctionType` taking
+        // all parameters at once, matching the multi-argument specialization
+        // shape emitted by codegen.
         Monotype::TypeFuncApplication(f, args) if matches!(**f, TypeFunc::Fn) => {
-            if args.len() < 2 {
-                return Err(format!(
-                    "codegen: cannot lower a function type with {} arguments",
-                    args.len()
-                ));
+            let mut params: Vec<Type> = Vec::new();
+            let mut cur = args;
+            loop {
+                if cur.len() < 2 {
+                    return Err(format!(
+                        "codegen: cannot lower a function type with {} arguments",
+                        cur.len()
+                    ));
+                }
+                params.push(lower_type(&cur[0], module)?);
+                match &cur[1] {
+                    Monotype::TypeFuncApplication(f2, args2)
+                        if matches!(**f2, TypeFunc::Fn) && args2.len() == 2 =>
+                    {
+                        cur = args2;
+                    }
+                    rest => {
+                        let ret = lower_type(rest, module)?;
+                        return Ok(FunctionType::new(module.context, &params, &[ret]).into());
+                    }
+                }
             }
-            let param_count = args.len() - 1;
-            let mut params = Vec::with_capacity(param_count);
-            for p in &args[..param_count] {
-                params.push(lower_type(p, module)?);
-            }
-            let ret = lower_type(&args[param_count], module)?;
-            Ok(FunctionType::new(module.context, &params, &[ret]).into())
         }
         Monotype::TypeFuncApplication(f, args)
             if matches!(**f, TypeFunc::List) && args.len() == 1 =>

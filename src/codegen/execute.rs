@@ -36,12 +36,10 @@ impl std::fmt::Debug for ExecutionResult {
 ///   - `Some((name, type))` invokes the nullary binding `@name` (used to show
 ///     the value of a `let` declaration, e.g. a list).
 ///   - `None` invokes `@__main` with the module's recorded entry type.
-pub fn execute(
-    module: &mut Module,
-    target: Option<(String, Monotype)>,
-) -> Result<ExecutionResult, String> {
+/// Lower the module to the LLVM dialect (the common step before JIT or
+/// object emission).
+fn run_passes(module: &mut Module) -> Result<(), String> {
     let context = module.context;
-
     let pass_manager = pass::PassManager::new(context);
     pass_manager.add_pass(pass::conversion::create_scf_to_control_flow());
     pass_manager.add_pass(pass::conversion::create_arith_to_llvm());
@@ -50,8 +48,31 @@ pub fn execute(
     pass_manager.add_pass(pass::conversion::create_reconcile_unrealized_casts());
     pass_manager
         .run(module.as_mlir_module_mut())
-        .map_err(|e| format!("codegen: pass manager failed: {}", e))?;
+        .map_err(|e| format!("codegen: pass manager failed: {}", e))
+}
 
+/// Compile the module to a native object file. Adds a `@main` wrapper (so the
+/// object can be linked into an executable), lowers to LLVM, and dumps the
+/// object to `obj_path`.
+pub fn compile(module: &mut Module, obj_path: &str) -> Result<(), String> {
+    super::stmt::emit_main_wrapper(module)?;
+    run_passes(module)?;
+    let engine = ExecutionEngine::new(module.as_mlir_module_mut(), 2, &[], true, true);
+    engine.dump_to_object_file(obj_path);
+    Ok(())
+}
+
+/// Run the compiled module through the LLVM JIT and read back the result.
+///
+/// `target` selects which symbol to invoke:
+///   - `Some((name, type))` invokes the nullary binding `@name` (used to show
+///     the value of a `let` declaration, e.g. a list).
+///   - `None` invokes `@__main` with the module's recorded entry type.
+pub fn execute(
+    module: &mut Module,
+    target: Option<(String, Monotype)>,
+) -> Result<ExecutionResult, String> {
+    run_passes(module)?;
     let engine = ExecutionEngine::new(module.as_mlir_module_mut(), 2, &[], false, false);
 
     let (symbol, return_type) = match target {
@@ -188,7 +209,7 @@ unsafe fn read_value(ptr: *const u8, mono: &Monotype) -> ExecutionResult {
                 if matches!(**f, TypeFunc::List) && args.len() == 1 =>
             {
                 let sub = *(ptr as *const *const u8);
-                ExecutionResult::List(unsafe { read_list(sub, &args[0]) })
+                ExecutionResult::List(read_list(sub, &args[0]))
             }
             _ => ExecutionResult::Unit,
         }
