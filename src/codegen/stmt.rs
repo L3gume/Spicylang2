@@ -2,7 +2,7 @@
 
 use crate::ast::*;
 use crate::types::{Monotype, TypeFunc};
-use melior::dialect::{func, llvm};
+use melior::dialect::func;
 use melior::ir::{
     Attribute,
     attribute::{FlatSymbolRefAttribute, StringAttribute, TypeAttribute},
@@ -30,10 +30,20 @@ pub fn lower<'a>(prog: &Program, context: &'a melior::Context) -> Result<Module<
     let mut last_value: Option<Value<'a, '_>> = None;
     let mut last_monotype: Option<Monotype> = None;
     for stmt in &prog.stmts {
-        if let Some(value) = lower_stmt(stmt, &mut module, &entry_block)? {
-            last_value = Some(value);
-            if let SNode::Expr(e) = &*stmt.s {
-                last_monotype = Some(e.typ.clone());
+        match lower_stmt(stmt, &mut module, &entry_block)? {
+            Some(value) => {
+                last_value = Some(value);
+                last_monotype = if let SNode::Expr(e) = &*stmt.s {
+                    Some(e.typ.clone())
+                } else {
+                    None
+                };
+            }
+            // A trailing non-expression statement (e.g. a `let`) produces no
+            // value: `__main` must return unit, not a stale earlier value.
+            None => {
+                last_value = None;
+                last_monotype = None;
             }
         }
     }
@@ -264,7 +274,10 @@ pub fn lower_decl<'a>(
         StringAttribute::new(module.context, &name),
         TypeAttribute::new(function_type.into()),
         region,
-        &[],
+        &[(
+            Identifier::new(module.context, "llvm.emit_c_interface"),
+            Attribute::unit(module.context),
+        )],
         location,
     );
     module.module.body().append_operation(function);

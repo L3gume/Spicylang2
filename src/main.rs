@@ -100,10 +100,6 @@ fn repl_loop(initial: Option<Box<Program>>) {
         Some(prog) => prog.stmts.clone(),
         None => Vec::new(),
     };
-    let mut ctx: types::TypeContext = match &initial {
-        Some(prog) => prog.ctx.clone(),
-        None => types::TypeContext::new(),
-    };
 
     loop {
         print!("> ");
@@ -142,14 +138,51 @@ fn repl_loop(initial: Option<Box<Program>>) {
                         accumulated_stmts.truncate(accumulated_stmts.len() - new_count);
                     }
                     Ok(()) => {
-                        ctx = full.ctx.clone();
                         accumulated_stmts = full.stmts.clone();
+                        // Determine the last statement's type and, for a
+                        // `let`, which nullary binding to invoke to read its
+                        // value back.
+                        let (last_type, last_kind, target) = match full.stmts.last() {
+                            Some(stmt) => match &*stmt.s {
+                                ast::SNode::Expr(e) => (Some(e.typ.clone()), LastKind::Expr, None),
+                                ast::SNode::Decl(e1, _, e2) => {
+                                    if matches!(&*e2.e, ast::ENode::Abstraction(..)) {
+                                        (Some(e2.typ.clone()), LastKind::DeclFn, None)
+                                    } else {
+                                        let name = match &*e1.e {
+                                            ast::ENode::Variable(n) => n.clone(),
+                                            _ => String::new(),
+                                        };
+                                        let target = if name.is_empty() {
+                                            None
+                                        } else {
+                                            Some((name, e2.typ.clone()))
+                                        };
+                                        (Some(e2.typ.clone()), LastKind::DeclScalar, target)
+                                    }
+                                }
+                                _ => (None, LastKind::Other, None),
+                            },
+                            None => (None, LastKind::Other, None),
+                        };
                         match codegen::lower(&full, &mlir_ctx) {
                             Err(e) => eprintln!("codegen error: {}", e),
                             Ok(mut module) => {
-                                match codegen::execute(&mut module) {
+                                if matches!(last_kind, LastKind::DeclFn) {
+                                    match last_type {
+                                        Some(typ) => println!("  : {} : <fn>", render_type(&typ)),
+                                        None => println!("  : <fn>"),
+                                    }
+                                    continue;
+                                }
+                                match codegen::execute(&mut module, target) {
                                     Err(e) => eprintln!("execution error: {}", e),
-                                    Ok(result) => println!("  = {:?}", result),
+                                    Ok(result) => {
+                                        match last_type {
+                                            Some(typ) => println!("  : {} = {:?}", render_type(&typ), result),
+                                            None => println!("  = {:?}", result),
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -157,5 +190,41 @@ fn repl_loop(initial: Option<Box<Program>>) {
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LastKind {
+    Expr,
+    DeclFn,
+    DeclScalar,
+    Other,
+}
+
+fn render_type(t: &types::Monotype) -> String {
+    use types::{Monotype, TypeFunc};
+    match t {
+        Monotype::TypeVariable(v) => v.clone(),
+        Monotype::TypeFuncApplication(f, args) => match **f {
+            TypeFunc::Infer => "_".to_string(),
+            TypeFunc::Unit => "()".to_string(),
+            TypeFunc::Int => "int".to_string(),
+            TypeFunc::Float => "float".to_string(),
+            TypeFunc::Bool => "bool".to_string(),
+            TypeFunc::Str => "str".to_string(),
+            TypeFunc::Fn => args.iter().map(render_type).collect::<Vec<_>>().join(" -> "),
+            TypeFunc::List => match args.first() {
+                Some(elem) => format!("[{}]", render_type(elem)),
+                None => "list".to_string(),
+            },
+            TypeFunc::Enum(ref name) => {
+                if args.is_empty() {
+                    name.clone()
+                } else {
+                    let rendered: Vec<String> = args.iter().map(render_type).collect();
+                    format!("{} {}", name, rendered.join(" "))
+                }
+            }
+        },
     }
 }

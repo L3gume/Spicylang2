@@ -16,6 +16,16 @@ let lfold = \fn acc ls => match ls
 
 let add = \x y => x + y;
 
-let added = map (add 1) [1, 2, 3];
+let fib = \(n : int) => match n
+    | 0 => 1
+    | 1 => 1
+    | x => fib (x - 1) + fib (x - 2)
+    ;
 
-let sum = lfold add 0 [1,2,3,4];
+let tl_fib = \(n : int) =>
+    let loop = \i a b =>
+        if i == n then
+            a
+        else
+            loop (i+1) (b) (a+b)
+    in loop 0 1 1;

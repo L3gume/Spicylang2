@@ -1,32 +1,14 @@
-
-let fib = \(n : int) =>
-    if n > 1 then
-    {
-        let f1 = fib n - 1;
-        let f2 = fib n - 2;
-        f1 + f2
-    }
-    else
-        1;
-
-let fib2 = \(n : int) =>
-    if n > 1 then
-        fib2 (n - 1) + fib (n - 2)
-    else
-        1;
-
-let fib3 = \(n : int) =>
-    if n > 1 then
-        let f1 = fib3 n - 1 in
-            let f2 = fib3 n - 2 in
-                f1 + f2
-    else
-        1;
-
-let fib4 = \(n : int) => match n
+let fib = \(n : int) => match n
     | 0 => 1
     | 1 => 1
     | x => fib (x - 1) + fib (x - 2)
     ;
 
-let fifth = fib 5;
+let tl_fib = \(n : int) =>
+    let loop = \i a b =>
+        if i == n then
+            a
+        else
+            loop (i+1) (b) (a+b)
+    in loop 0 1 1;
+

@@ -1,7 +1,7 @@
 //! Type mapping to MLIR types.
 
 use crate::types::{Monotype, TypeFunc};
-use melior::ir::r#type::IntegerType;
+use melior::ir::r#type::{FunctionType, IntegerType};
 use melior::ir::Type;
 
 use super::Module;
@@ -30,14 +30,19 @@ pub(crate) fn lower_type<'a>(typ: &Monotype, module: &Module<'a>) -> Result<Type
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string()),
         },
         Monotype::TypeFuncApplication(f, args) if matches!(**f, TypeFunc::Fn) => {
-            if args.len() != 2 {
+            if args.len() < 2 {
                 return Err(format!(
-                    "codegen: cannot lower a function type with {} argument(s)",
-                    args.len() - 1
+                    "codegen: cannot lower a function type with {} arguments",
+                    args.len()
                 ));
             }
-            Type::parse(module.context, "!llvm.ptr")
-                .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())
+            let param_count = args.len() - 1;
+            let mut params = Vec::with_capacity(param_count);
+            for p in &args[..param_count] {
+                params.push(lower_type(p, module)?);
+            }
+            let ret = lower_type(&args[param_count], module)?;
+            Ok(FunctionType::new(module.context, &params, &[ret]).into())
         }
         Monotype::TypeFuncApplication(f, args)
             if matches!(**f, TypeFunc::List) && args.len() == 1 =>

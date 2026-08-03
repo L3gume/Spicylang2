@@ -10,6 +10,7 @@ pub enum ExecutionResult {
     Float(f32),
     Bool(bool),
     String(String),
+    List(Vec<ExecutionResult>),
     Unit,
 }
 
@@ -20,12 +21,25 @@ impl std::fmt::Debug for ExecutionResult {
             ExecutionResult::Float(n) => write!(f, "{}", n),
             ExecutionResult::Bool(b) => write!(f, "{}", b),
             ExecutionResult::String(s) => write!(f, "\"{}\"", s),
+            ExecutionResult::List(items) => {
+                let rendered: Vec<String> = items.iter().map(|i| format!("{:?}", i)).collect();
+                write!(f, "[{}]", rendered.join(", "))
+            }
             ExecutionResult::Unit => write!(f, "()"),
         }
     }
 }
 
-pub fn execute(module: &mut Module) -> Result<ExecutionResult, String> {
+/// Run the compiled module through the LLVM JIT and read back the result.
+///
+/// `target` selects which symbol to invoke:
+///   - `Some((name, type))` invokes the nullary binding `@name` (used to show
+///     the value of a `let` declaration, e.g. a list).
+///   - `None` invokes `@__main` with the module's recorded entry type.
+pub fn execute(
+    module: &mut Module,
+    target: Option<(String, Monotype)>,
+) -> Result<ExecutionResult, String> {
     let context = module.context;
 
     let pass_manager = pass::PassManager::new(context);
@@ -40,84 +54,143 @@ pub fn execute(module: &mut Module) -> Result<ExecutionResult, String> {
 
     let engine = ExecutionEngine::new(module.as_mlir_module_mut(), 2, &[], false, false);
 
-    let return_type = module.entry_return_monotype().cloned();
-    match return_type {
-        None => {
-            unsafe {
-                engine
-                    .invoke_packed("__main", &mut [])
-                    .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
+    let (symbol, return_type) = match target {
+        Some((name, mono)) => (name, mono),
+        None => (
+            "__main".to_string(),
+            module
+                .entry_return_monotype()
+                .cloned()
+                .unwrap_or(Monotype::unit()),
+        ),
+    };
+
+    invoke(&engine, &symbol, &return_type)
+}
+
+fn invoke(
+    engine: &ExecutionEngine,
+    symbol: &str,
+    mono: &Monotype,
+) -> Result<ExecutionResult, String> {
+    match default_free_vars(mono) {
+        Monotype::TypeFuncApplication(ref f, ref args) if args.is_empty() => match **f {
+            TypeFunc::Int => {
+                let mut result: i32 = 0;
+                unsafe {
+                    engine
+                        .invoke_packed(symbol, &mut [&mut result as *mut i32 as *mut ()])
+                        .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
+                }
+                Ok(ExecutionResult::Int(result))
             }
-            Ok(ExecutionResult::Unit)
-        }
-        Some(ref mono) => match default_free_vars(mono) {
-            Monotype::TypeFuncApplication(ref f, ref args) if args.is_empty() => match **f {
-                TypeFunc::Int => {
-                    let mut result: i32 = 0;
-                    unsafe {
-                        engine
-                            .invoke_packed(
-                                "__main",
-                                &mut [&mut result as *mut i32 as *mut ()],
-                            )
-                            .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
-                    }
-                    Ok(ExecutionResult::Int(result))
+            TypeFunc::Float => {
+                let mut result: f32 = 0.0;
+                unsafe {
+                    engine
+                        .invoke_packed(symbol, &mut [&mut result as *mut f32 as *mut ()])
+                        .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
                 }
-                TypeFunc::Float => {
-                    let mut result: f32 = 0.0;
-                    unsafe {
-                        engine
-                            .invoke_packed(
-                                "__main",
-                                &mut [&mut result as *mut f32 as *mut ()],
-                            )
-                            .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
-                    }
-                    Ok(ExecutionResult::Float(result))
+                Ok(ExecutionResult::Float(result))
+            }
+            TypeFunc::Bool => {
+                let mut result: u8 = 0;
+                unsafe {
+                    engine
+                        .invoke_packed(symbol, &mut [&mut result as *mut u8 as *mut ()])
+                        .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
                 }
-                TypeFunc::Bool => {
-                    let mut result: u8 = 0;
-                    unsafe {
-                        engine
-                            .invoke_packed(
-                                "__main",
-                                &mut [&mut result as *mut u8 as *mut ()],
-                            )
-                            .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
-                    }
-                    Ok(ExecutionResult::Bool(result != 0))
+                Ok(ExecutionResult::Bool(result != 0))
+            }
+            TypeFunc::Str => {
+                let mut result: *const std::ffi::c_char = std::ptr::null();
+                unsafe {
+                    engine
+                        .invoke_packed(
+                            symbol,
+                            &mut [&mut result as *mut *const std::ffi::c_char as *mut ()],
+                        )
+                        .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
+                    let s = if result.is_null() {
+                        String::new()
+                    } else {
+                        std::ffi::CStr::from_ptr(result)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    Ok(ExecutionResult::String(s))
                 }
-                TypeFunc::Str => {
-                    let mut result: *const std::ffi::c_char = std::ptr::null();
-                    unsafe {
-                        engine
-                            .invoke_packed(
-                                "__main",
-                                &mut [&mut result as *mut *const std::ffi::c_char as *mut ()],
-                            )
-                            .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
-                        let s = if result.is_null() {
-                            String::new()
-                        } else {
-                            std::ffi::CStr::from_ptr(result)
-                                .to_string_lossy()
-                                .into_owned()
-                        };
-                        Ok(ExecutionResult::String(s))
-                    }
+            }
+            TypeFunc::Unit => {
+                unsafe {
+                    engine
+                        .invoke_packed(symbol, &mut [])
+                        .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
                 }
-                TypeFunc::Unit => {
-                    unsafe {
-                        engine
-                            .invoke_packed("__main", &mut [])
-                            .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
-                    }
-                    Ok(ExecutionResult::Unit)
-                }
-                _ => Err(format!("codegen: cannot JIT-execute type {:?}", mono)),
-            },
+                Ok(ExecutionResult::Unit)
+            }
             _ => Err(format!("codegen: cannot JIT-execute type {:?}", mono)),
         },
+        Monotype::TypeFuncApplication(ref f, ref args)
+            if matches!(**f, TypeFunc::List) && args.len() == 1 =>
+        {
+            let mut result: *const u8 = std::ptr::null();
+            unsafe {
+                engine
+                    .invoke_packed(symbol, &mut [&mut result as *mut *const u8 as *mut ()])
+                    .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
+                let items = read_list(result, &args[0]);
+                Ok(ExecutionResult::List(items))
+            }
+        }
+        _ => Err(format!("codegen: cannot JIT-execute type {:?}", mono)),
+    }
+}
+
+/// Walk a heap-allocated cons-cell list (`{ head: T, tail: !llvm.ptr }`,
+/// `null` for `[]`) reading each element's value.
+unsafe fn read_list(ptr: *const u8, elem: &Monotype) -> Vec<ExecutionResult> {
+    let mut items = Vec::new();
+    let mut cur = ptr;
+    while !cur.is_null() {
+        items.push(unsafe { read_value(cur, elem) });
+        // Tail pointer is the second field of the cons-cell struct; with the
+        // element types supported here it always sits at offset 8.
+        cur = unsafe { *(cur.add(8) as *const *const u8) };
+    }
+    items
+}
+
+/// Read a single value of type `mono` from the memory at `ptr`.
+unsafe fn read_value(ptr: *const u8, mono: &Monotype) -> ExecutionResult {
+    unsafe {
+        match default_free_vars(mono) {
+            Monotype::TypeFuncApplication(ref f, ref args) if args.is_empty() => match **f {
+                TypeFunc::Int => ExecutionResult::Int(*(ptr as *const i32)),
+                TypeFunc::Float => ExecutionResult::Float(*(ptr as *const f32)),
+                TypeFunc::Bool => ExecutionResult::Bool(*(ptr as *const u8) != 0),
+                TypeFunc::Str => {
+                    let s = *(ptr as *const *const std::ffi::c_char);
+                    if s.is_null() {
+                        ExecutionResult::String(String::new())
+                    } else {
+                        ExecutionResult::String(
+                            std::ffi::CStr::from_ptr(s)
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
+                    }
+                }
+                TypeFunc::Unit => ExecutionResult::Unit,
+                _ => ExecutionResult::Unit,
+            },
+            Monotype::TypeFuncApplication(ref f, ref args)
+                if matches!(**f, TypeFunc::List) && args.len() == 1 =>
+            {
+                let sub = *(ptr as *const *const u8);
+                ExecutionResult::List(unsafe { read_list(sub, &args[0]) })
+            }
+            _ => ExecutionResult::Unit,
+        }
     }
 }

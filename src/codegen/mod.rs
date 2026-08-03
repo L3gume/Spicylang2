@@ -126,6 +126,11 @@ pub struct Module<'a> {
     /// Cache of emitted specializations: `(binding name, canonical
     /// instantiation type) -> closure symbol`.
     specializations: HashMap<(String, String), String>,
+    /// Cache of emitted partial applications: `(binding name, argument
+    /// fingerprint, instantiation type) -> partial function symbol`. Keyed by
+    /// the argument so recursive partial applications (e.g. `map fn xs` inside
+    /// `map`) reuse the same function instead of re-lowering infinitely.
+    partials: HashMap<(String, String, String), String>,
     /// Number of specialization symbols emitted.
     spec_counter: usize,
     /// Number of let-bound abstractions registered, for unique registry names.
@@ -154,6 +159,7 @@ impl<'a> Module<'a> {
             closures: 0,
             abstractions: HashMap::new(),
             specializations: HashMap::new(),
+            partials: HashMap::new(),
             spec_counter: 0,
             let_counter: 0,
             constructors: HashMap::new(),
