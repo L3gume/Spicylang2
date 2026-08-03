@@ -76,24 +76,27 @@ pub fn execute(
     let engine = ExecutionEngine::new(module.as_mlir_module_mut(), 2, &[], false, false);
 
     let (symbol, return_type) = match target {
-        Some((name, mono)) => (name, mono),
-        None => (
-            "__main".to_string(),
-            module
-                .entry_return_monotype()
-                .cloned()
-                .unwrap_or(Monotype::unit()),
-        ),
+        Some((name, mono)) => (name, Some(mono)),
+        None => ("__main".to_string(), module.entry_return_monotype().cloned()),
     };
 
-    invoke(&engine, &symbol, &return_type)
+    invoke(&engine, &symbol, return_type.as_ref())
 }
 
 fn invoke(
     engine: &ExecutionEngine,
     symbol: &str,
-    mono: &Monotype,
+    mono: Option<&Monotype>,
 ) -> Result<ExecutionResult, String> {
+    let Some(mono) = mono else {
+        // `__main` returns nothing (trailing `print`/`let`): truly void.
+        unsafe {
+            engine
+                .invoke_packed(symbol, &mut [])
+                .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
+        }
+        return Ok(ExecutionResult::Unit);
+    };
     match default_free_vars(mono) {
         Monotype::TypeFuncApplication(ref f, ref args) if args.is_empty() => match **f {
             TypeFunc::Int => {
@@ -143,9 +146,12 @@ fn invoke(
                 }
             }
             TypeFunc::Unit => {
+                // Unit expressions are materialized as `i32` in MLIR, so the
+                // invoked function does return a value and needs a result slot.
+                let mut result: i32 = 0;
                 unsafe {
                     engine
-                        .invoke_packed(symbol, &mut [])
+                        .invoke_packed(symbol, &mut [&mut result as *mut i32 as *mut ()])
                         .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
                 }
                 Ok(ExecutionResult::Unit)

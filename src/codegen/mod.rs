@@ -83,6 +83,7 @@ pub struct EnumLayout {
 /// A polymorphic (or monomorphic) lambda binding `name = \p => body`, kept so
 /// a specialized `func.func` can be emitted on demand for every concrete type
 /// the binding is used at.
+#[derive(Clone)]
 pub struct AbstractionInfo {
     /// The bound parameter name.
     pub param: String,
@@ -124,8 +125,8 @@ pub struct Module<'a> {
     /// Lambda bindings awaiting per-type specialization, keyed by name.
     abstractions: HashMap<String, AbstractionInfo>,
     /// Cache of emitted specializations: `(binding name, canonical
-    /// instantiation type) -> closure symbol`.
-    specializations: HashMap<(String, String), String>,
+    /// instantiation type, capture types) -> closure symbol`.
+    specializations: HashMap<(String, String, String), String>,
     /// Function-valued `let` bindings whose right-hand side is an application
     /// (e.g. `let sum = lfold add 0;`), kept as expressions and inlined at
     /// use sites rather than evaluated to a closure value eagerly.

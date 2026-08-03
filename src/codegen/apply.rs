@@ -192,6 +192,33 @@ fn peel_inner(body: &Expr) -> Expr {
     cur
 }
 
+/// Free variables of a lambda (beyond its own parameters and the recursive
+/// self-name) that are bound to runtime values in the current environment.
+/// These must be threaded as leading capture parameters to the lifted
+/// specialization. Returns `(name, MLIR type)` pairs, sorted for determinism.
+fn lambda_captures<'c, 'a>(
+    info: &AbstractionInfo,
+    self_name: &str,
+    env: &Env<'c, 'a>,
+) -> Vec<(String, Type<'c>)> {
+    let params = abstraction_params(&info.param, &info.body);
+    let body = peel_inner(&info.body);
+    let free = free_variables(&body);
+    let mut caps: Vec<(String, Type<'c>)> = Vec::new();
+    for fv in free {
+        if fv == self_name || params.contains(&fv) {
+            continue;
+        }
+        if let Some(EnvEntry::Value(v)) = env.get(&fv) {
+            if !caps.iter().any(|(n, _)| n == &fv) {
+                caps.push((fv.clone(), v.r#type()));
+            }
+        }
+    }
+    caps.sort_by(|a, b| a.0.cmp(&b.0));
+    caps
+}
+
 /// Flatten a left-nested application `((f a) b)` into the root expression and
 /// an ordered argument list, expanding function-valued `let` bindings.
 fn collect_application_root<'a>(expr: &'a Expr, args: &mut Vec<Expr>, module: &Module) -> Expr {
@@ -250,11 +277,17 @@ fn reference_specialization<'c, 'a>(
     sym: &str,
     self_name: &str,
     typ: &Monotype,
+    captures: &[(String, Type<'c>)],
     block: &'a Block<'c>,
     module: &mut Module<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let symbol = specialize_binding(sym, self_name, typ, module)?;
-    let func_type = specialization_function_type(sym, typ, module)?;
+    if !captures.is_empty() {
+        return Err(format!(
+            "codegen: cannot use `{self_name}` (a closure with captures) as a value yet"
+        ));
+    }
+    let symbol = specialize_binding(sym, self_name, typ, captures, module)?;
+    let func_type = specialization_function_type(sym, typ, captures, module)?;
     let location = Location::unknown(module.context);
     block
         .append_operation(func::constant(
@@ -283,7 +316,11 @@ pub(crate) fn lower_variable<'c, 'a>(
     match env.get(name) {
         Some(EnvEntry::Value(value)) => return Ok(*value),
         Some(EnvEntry::Abstraction(sym)) => {
-            return reference_specialization(sym, name, &expr.typ, block, module);
+            let info = module.abstractions.get(sym).ok_or_else(|| {
+                format!("codegen: `{sym}` is not a registered lambda binding")
+            })?;
+            let captures = lambda_captures(info, name, env);
+            return reference_specialization(sym, name, &expr.typ, &captures, block, module);
         }
         None => {}
     }
@@ -299,7 +336,9 @@ pub(crate) fn lower_variable<'c, 'a>(
     // site resolved to, and referenced by `func.constant` on that
     // specialization.
     if module.abstractions.contains_key(name) {
-        return reference_specialization(name, name, &expr.typ, block, module);
+        let info = module.abstractions.get(name).unwrap();
+        let captures = lambda_captures(info, name, env);
+        return reference_specialization(name, name, &expr.typ, &captures, block, module);
     }
 
     // A nullary enum constructor (`None`) builds a tagged value with no
@@ -348,6 +387,7 @@ fn specialize_binding<'c>(
     name: &str,
     self_name: &str,
     typ: &Monotype,
+    captures: &[(String, Type<'c>)],
     module: &mut Module<'c>,
 ) -> Result<String, String> {
     let info = module.abstractions.get(name).ok_or_else(|| {
@@ -358,7 +398,12 @@ fn specialize_binding<'c>(
     let concrete = default_free_vars(typ);
     let (param_monos, ret_mono) = concrete_func_parts(typ, params.len())?;
 
-    let key = (name.to_string(), format!("{concrete:?}"));
+    let capture_types: Vec<String> = captures.iter().map(|(_, t)| t.to_string()).collect();
+    let key = (
+        name.to_string(),
+        format!("{concrete:?}"),
+        capture_types.join("|"),
+    );
     if let Some(symbol) = module.specializations.get(&key) {
         return Ok(symbol.clone());
     }
@@ -380,10 +425,22 @@ fn specialize_binding<'c>(
     let ret_mlir = lower_type(&ret_mono, module)?;
     let location = Location::unknown(module.context);
 
-    let block = Block::new(&param_mlirs.iter().map(|t| (*t, location)).collect::<Vec<_>>());
+    // Captured variables are threaded as leading parameters, so the lifted
+    // function is `@spec(captures..., params...) -> ret`.
+    let mut all_inputs: Vec<Type> = captures.iter().map(|(_, t)| *t).collect();
+    all_inputs.extend(param_mlirs.iter().copied());
+
+    let block = Block::new(&all_inputs.iter().map(|t| (*t, location)).collect::<Vec<_>>());
     let mut env = HashMap::new();
-    for (i, p) in params.iter().enumerate() {
+    for (i, (cname, _)) in captures.iter().enumerate() {
         let arg: Value<'c, '_> = block.argument(i).map_err(|e| e.to_string())?.into();
+        env.insert(cname.clone(), EnvEntry::Value(arg));
+    }
+    for (j, p) in params.iter().enumerate() {
+        let arg: Value<'c, '_> = block
+            .argument(captures.len() + j)
+            .map_err(|e| e.to_string())?
+            .into();
         env.insert(p.clone(), EnvEntry::Value(arg));
     }
     if self_name != name {
@@ -393,7 +450,7 @@ fn specialize_binding<'c>(
     let body_value = lower_expr(&inner_body, &block, module, &mut env)?;
     block.append_operation(func::r#return(&[body_value], location));
 
-    let function_type = FunctionType::new(module.context, &param_mlirs, &[ret_mlir]);
+    let function_type = FunctionType::new(module.context, &all_inputs, &[ret_mlir]);
     let region = Region::new();
     region.append_block(block);
 
@@ -455,11 +512,13 @@ pub(crate) fn lower_application<'c, 'a>(
         };
         if let Some(sym) = sym {
             if let Some(info) = module.abstractions.get(&sym) {
+                let info = info.clone();
                 let params = abstraction_params(&info.param, &info.body);
                 if args.len() == params.len() {
                     return lower_full_application(
                         &sym,
                         name,
+                        &info,
                         &root.typ,
                         &params,
                         &args,
@@ -520,6 +579,7 @@ pub(crate) fn lower_application<'c, 'a>(
 fn lower_full_application<'c, 'a>(
     sym: &str,
     self_name: &str,
+    info: &AbstractionInfo,
     root_typ: &Monotype,
     params: &[String],
     args: &[Expr],
@@ -528,20 +588,27 @@ fn lower_full_application<'c, 'a>(
     env: &mut Env<'c, 'a>,
 ) -> Result<Value<'c, 'a>, String> {
     let location = Location::unknown(module.context);
-    let symbol = specialize_binding(sym, self_name, root_typ, module)?;
+    let captures = lambda_captures(info, self_name, env);
+    let symbol = specialize_binding(sym, self_name, root_typ, &captures, module)?;
 
     let (_, ret_mono) = concrete_func_parts(root_typ, params.len())?;
     let ret_mlir = lower_type(&ret_mono, module)?;
 
-    let arg_values: Vec<Value<'c, 'a>> = args
-        .iter()
-        .map(|a| lower_expr(a, block, module, env))
-        .collect::<Result<_, _>>()?;
+    let mut call_args: Vec<Value<'c, 'a>> = Vec::with_capacity(captures.len() + args.len());
+    for (cname, _) in &captures {
+        match env.get(cname) {
+            Some(EnvEntry::Value(v)) => call_args.push(*v),
+            _ => return Err(format!("codegen: missing capture `{cname}`")),
+        }
+    }
+    for a in args {
+        call_args.push(lower_expr(a, block, module, env)?);
+    }
 
     let call = func::call(
         module.context,
         FlatSymbolRefAttribute::new(module.context, &symbol),
-        &arg_values,
+        &call_args,
         &[ret_mlir],
         location,
     );
@@ -605,6 +672,7 @@ fn concrete_func_parts(typ: &Monotype, arity: usize) -> Result<(Vec<Monotype>, M
 fn specialization_function_type<'a>(
     name: &str,
     typ: &Monotype,
+    captures: &[(String, Type<'a>)],
     module: &Module<'a>,
 ) -> Result<FunctionType<'a>, String> {
     let info = module
@@ -613,10 +681,10 @@ fn specialization_function_type<'a>(
         .ok_or_else(|| format!("codegen: `{name}` is not a registered lambda binding"))?;
     let arity = abstraction_params(&info.param, &info.body).len();
     let (params, ret) = concrete_func_parts(typ, arity)?;
-    let param_mlirs = params
-        .iter()
-        .map(|m| lower_type(m, module))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut param_mlirs: Vec<Type<'a>> = captures.iter().map(|(_, t)| *t).collect();
+    for m in &params {
+        param_mlirs.push(lower_type(m, module)?);
+    }
     let ret_mlir = lower_type(&ret, module)?;
     Ok(FunctionType::new(module.context, &param_mlirs, &[ret_mlir]))
 }
@@ -669,12 +737,12 @@ pub(crate) fn lower_abstraction<'c, 'a>(
                     if let Some(info) = module.abstractions.get(sym) {
                         let concrete = default_free_vars(&info.abs_type);
                         let mlir_type = lower_type(&concrete, module)?;
-                        let ref_val = reference_specialization(sym, name, &concrete, block, module)?;
+                        let ref_val = reference_specialization(sym, name, &concrete, &[], block, module)?;
                         captures.push((name.clone(), ref_val, mlir_type));
                     } else if let Some(info) = module.abstractions.get(name) {
                         let concrete = default_free_vars(&info.abs_type);
                         let mlir_type = lower_type(&concrete, module)?;
-                        let ref_val = reference_specialization(name, name, &concrete, block, module)?;
+                        let ref_val = reference_specialization(name, name, &concrete, &[], block, module)?;
                         captures.push((name.clone(), ref_val, mlir_type));
                     } else {
                         return Err(format!(
