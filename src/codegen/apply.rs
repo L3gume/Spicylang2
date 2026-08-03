@@ -1039,6 +1039,10 @@ fn lower_string<'c, 'a>(
                 Identifier::new(context, "global_type"),
                 TypeAttribute::new(array_type).into(),
             ),
+            (
+                Identifier::new(context, "linkage"),
+                llvm_private_linkage(context),
+            ),
         ])
         .add_regions([Region::new()])
         .build()
@@ -1070,4 +1074,12 @@ fn lower_string<'c, 'a>(
         .result(0)
         .map_err(|e| e.to_string())
         .map(Into::into)
+}
+
+/// `#llvm.linkage<private>` attribute, required by `llvm.mlir.global`.
+fn llvm_private_linkage(context: &melior::Context) -> melior::ir::Attribute<'_> {
+    melior::dialect::llvm::attributes::linkage(
+        context,
+        melior::dialect::llvm::attributes::Linkage::Private,
+    )
 }
