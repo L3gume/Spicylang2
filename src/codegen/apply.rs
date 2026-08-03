@@ -5,6 +5,7 @@ use crate::ast::*;
 use crate::types::{Monotype, TypeFunc};
 use melior::dialect::{arith, func, llvm};
 use melior::ir::{
+    Attribute,
     attribute::{
         BoolAttribute, DenseI32ArrayAttribute, FlatSymbolRefAttribute, FloatAttribute,
         IntegerAttribute, StringAttribute, TypeAttribute,
@@ -77,7 +78,7 @@ pub(crate) fn bind_in_env<'c, 'a>(
 }
 
 /// Emit a `func.constant` reference to the specialization of `sym` at the
-/// concrete type `typ`.
+/// concrete type `typ`, returning a func-typed SSA value.
 fn reference_specialization<'c, 'a>(
     sym: &str,
     typ: &Monotype,
@@ -85,8 +86,24 @@ fn reference_specialization<'c, 'a>(
     module: &mut Module<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     let symbol = specialize_binding(sym, typ, module)?;
+    let (param_mono, ret_mono) = concrete_parts(typ)
+        .ok_or_else(|| format!("codegen: cannot reference `{sym}`: not a function type"))?;
+    let func_type = FunctionType::new(
+        module.context,
+        &[lower_type(&param_mono, module)?],
+        &[lower_type(&ret_mono, module)?],
+    );
     let location = Location::unknown(module.context);
-    build_closure(module, block, &symbol, &[], location)
+    block
+        .append_operation(func::constant(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, &symbol),
+            func_type,
+            location,
+        ))
+        .result(0)
+        .map_err(|e| e.to_string())
+        .map(Into::into)
 }
 
 /// Lower a variable reference: a bound value/abstraction if it is in `env`, a
@@ -190,11 +207,9 @@ fn specialize_binding<'c>(
 
     let param_mlir = lower_type(&param_mono, module)?;
     let ret_mlir = lower_type(&ret_mono, module)?;
-    let env_ptr = Type::parse(module.context, "!llvm.ptr")
-        .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
     let location = Location::unknown(module.context);
 
-    let closure_block = Block::new(&[(param_mlir, location), (env_ptr, location)]);
+    let closure_block = Block::new(&[(param_mlir, location)]);
     let arg = closure_block.argument(0).map_err(|e| e.to_string())?;
     let mut env = HashMap::new();
     env.insert(param, EnvEntry::Value(arg.into()));
@@ -203,7 +218,7 @@ fn specialize_binding<'c>(
     closure_block.append_operation(func::r#return(&[body_value], location));
 
     let function_type =
-        FunctionType::new(module.context, &[param_mlir, env_ptr], &[ret_mlir]);
+        FunctionType::new(module.context, &[param_mlir], &[ret_mlir]);
     let region = Region::new();
     region.append_block(closure_block);
 
@@ -253,7 +268,7 @@ pub(crate) fn lower_application<'c, 'a>(
     let function = lower_expr(f, block, module, env)?;
     let argument = lower_expr(x, block, module, env)?;
 
-    let (_, ret_mono) = concrete_parts(&f.typ).ok_or_else(|| {
+    let (param_mono, ret_mono) = concrete_parts(&f.typ).ok_or_else(|| {
         format!(
             "codegen: cannot apply {:?}: expected a single-argument function type",
             *f.e
@@ -261,7 +276,21 @@ pub(crate) fn lower_application<'c, 'a>(
     })?;
     let ret_mlir = lower_type(&ret_mono, module)?;
 
-    closure_call(module, block, function, &[argument], ret_mlir, location)
+    let func_type_str = function.r#type().to_string();
+    if func_type_str.starts_with("(i") || func_type_str.starts_with("(f") || func_type_str.starts_with("(b") || func_type_str.starts_with("(!") {
+        block
+            .append_operation(func::call_indirect(
+                function,
+                &[argument],
+                &[ret_mlir],
+                location,
+            ))
+            .result(0)
+            .map_err(|e| e.to_string())
+            .map(Into::into)
+    } else {
+        closure_call(module, block, function, &[argument], ret_mlir, location)
+    }
 }
 
 /// Split a single-argument function type `A => B` into `(A, B)`.
@@ -324,8 +353,7 @@ pub(crate) fn lower_abstraction<'c, 'a>(
         _ => param_type.t.clone(),
     };
     let param_mlir = lower_type(&param_mono, module)?;
-    let env_ptr = Type::parse(module.context, "!llvm.ptr")
-        .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
+    let env_i64 = IntegerType::new(module.context, 64).into();
 
     // Captures: free variables of the body that are bound in the enclosing
     // environment. Their values are available here (at closure creation) and
@@ -349,15 +377,63 @@ pub(crate) fn lower_abstraction<'c, 'a>(
     module.closures += 1;
     let location = Location::unknown(module.context);
 
-    let closure_block = Block::new(&[(param_mlir, location), (env_ptr, location)]);
-    let arg = closure_block.argument(0).map_err(|e| e.to_string())?;
-    let env_arg: Value<'c, 'a> = closure_block
-        .argument(1)
-        .map_err(|e| e.to_string())?
-        .into();
-    let mut closure_env = HashMap::new();
-    closure_env.insert(name.clone(), EnvEntry::Value(arg.into()));
-    if !captures.is_empty() {
+    if captures.is_empty() {
+        let closure_block = Block::new(&[(param_mlir, location)]);
+        let arg: Value<'c, 'a> = closure_block.argument(0).map_err(|e| e.to_string())?.into();
+        let mut closure_env = HashMap::new();
+        closure_env.insert(name.clone(), EnvEntry::Value(arg));
+
+        let body_value = lower_expr(body, &closure_block, module, &mut closure_env)?;
+        closure_block.append_operation(func::r#return(&[body_value], location));
+
+        let function_type =
+            FunctionType::new(module.context, &[param_mlir], &[body_value.r#type()]);
+        let region = Region::new();
+        region.append_block(closure_block);
+
+        let function = func::func(
+            module.context,
+            StringAttribute::new(module.context, &symbol),
+            TypeAttribute::new(function_type.into()),
+            region,
+            &[],
+            location,
+        );
+        module.module.body().append_operation(function);
+        module.functions += 1;
+
+        block
+            .append_operation(func::constant(
+                module.context,
+                FlatSymbolRefAttribute::new(module.context, &symbol),
+                function_type,
+                location,
+            ))
+            .result(0)
+            .map_err(|e| e.to_string())
+            .map(Into::into)
+    } else {
+        let closure_block = Block::new(&[(param_mlir, location), (env_i64, location)]);
+        let arg = closure_block.argument(0).map_err(|e| e.to_string())?.into();
+        let env_arg_i64: Value<'c, 'a> = closure_block
+            .argument(1)
+            .map_err(|e| e.to_string())?
+            .into();
+        let mut closure_env = HashMap::new();
+        closure_env.insert(name.clone(), EnvEntry::Value(arg));
+
+        let env_ptr = Type::parse(module.context, "!llvm.ptr")
+            .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
+        let inttoptr = OperationBuilder::new("llvm.inttoptr", location)
+            .add_operands(&[env_arg_i64])
+            .add_results(&[env_ptr])
+            .build()
+            .map_err(|e| e.to_string())?;
+        let env_arg: Value<'c, 'a> = closure_block
+            .append_operation(inttoptr)
+            .result(0)
+            .map_err(|e| e.to_string())?
+            .into();
         let env_struct = env_struct_type(module, &captures)?;
         for (i, (capture, _, typ)) in captures.iter().enumerate() {
             let value = load_field(
@@ -371,28 +447,31 @@ pub(crate) fn lower_abstraction<'c, 'a>(
             )?;
             closure_env.insert(capture.clone(), EnvEntry::Value(value));
         }
+
+        let body_value = lower_expr(body, &closure_block, module, &mut closure_env)?;
+        closure_block.append_operation(func::r#return(&[body_value], location));
+
+        let function_type =
+            FunctionType::new(module.context, &[param_mlir, env_i64], &[body_value.r#type()]);
+        let region = Region::new();
+        region.append_block(closure_block);
+
+        let function = func::func(
+            module.context,
+            StringAttribute::new(module.context, &symbol),
+            TypeAttribute::new(function_type.into()),
+            region,
+            &[(
+                Identifier::new(module.context, "llvm.emit_c_interface"),
+                Attribute::unit(module.context),
+            )],
+            location,
+        );
+        module.module.body().append_operation(function);
+        module.functions += 1;
+
+        build_closure(module, block, &symbol, &captures, location)
     }
-
-    let body_value = lower_expr(body, &closure_block, module, &mut closure_env)?;
-    closure_block.append_operation(func::r#return(&[body_value], location));
-
-    let function_type =
-        FunctionType::new(module.context, &[param_mlir, env_ptr], &[body_value.r#type()]);
-    let region = Region::new();
-    region.append_block(closure_block);
-
-    let function = func::func(
-        module.context,
-        StringAttribute::new(module.context, &symbol),
-        TypeAttribute::new(function_type.into()),
-        region,
-        &[],
-        location,
-    );
-    module.module.body().append_operation(function);
-    module.functions += 1;
-
-    build_closure(module, block, &symbol, &captures, location)
 }
 
 /// Lower a literal to an `arith.constant`, returning its SSA value.
@@ -476,10 +555,11 @@ fn lower_string<'c, 'a>(
                 StringAttribute::new(context, &format!("{value}\0")).into(),
             ),
             (
-                Identifier::new(context, "type"),
+                Identifier::new(context, "global_type"),
                 TypeAttribute::new(array_type).into(),
             ),
         ])
+        .add_regions([Region::new()])
         .build()
         .map_err(|e| e.to_string())?;
     module.module.body().append_operation(global);

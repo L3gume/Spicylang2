@@ -7,9 +7,10 @@
     - [ ] (Very Long term) explicit impl of operators for custom types
 - [x] Recursive functions
 - [x] Fix conflict between negative integer literal and binary - operation
-- [ ] MLIR code generation
-- [ ] Builtin List stuff (len, head, tail, first, last, whatever else, etc.)
-    - [x] builtin cons and list expressions
+- [x] MLIR code generation
+    - [ ] Make sense of this stuff
+    - [ ] Actually compile and execute
+    - [ ] Make repl jit-compiled
 - [ ] Better parser + lexer
     - [ ] Location info in AST
     - [ ] Better error messages in parse and typecheck
@@ -18,3 +19,14 @@
 - [x] User-defined enumeration types
 - [ ] User-defined structure types
 - [x] Pattern Matching on expressions
+- [ ] Builtin type to string conversions for print
+    - OCaml does str_of_xx for this, just applying 'str' to value is fine, type checker will simply return str type
+    - Code gen will handle generating conversion code
+- [ ] Builtin List stuff
+    - [x] builtin cons and list expressions
+    - [ ] len
+    - [ ] head and tail
+    - [ ] last
+    - [ ] indexing (?)
+    - [ ] append
+- [ ] n-tuple type

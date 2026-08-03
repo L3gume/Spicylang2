@@ -2,7 +2,7 @@
 
 use crate::ast::*;
 use crate::types::{Monotype, TypeFunc};
-use melior::dialect::{arith, llvm};
+use melior::dialect::{arith, func, llvm};
 use melior::dialect::llvm::LoadStoreOptions;
 use melior::ir::{
     attribute::{DenseI32ArrayAttribute, FlatSymbolRefAttribute, IntegerAttribute, StringAttribute, TypeAttribute},
@@ -44,25 +44,28 @@ pub(crate) fn cell_struct_type<'c>(module: &Module<'c>, elem: Type<'c>) -> Resul
     )
 }
 
-/// Emit the external declaration `llvm.func @malloc(i64) -> !llvm.ptr` once.
+/// Emit the external declaration `func.func @malloc(i64) -> i64` once.
+/// Uses `func.func` with only built-in types so the `func_to_llvm` pass
+/// can convert it cleanly.
 pub(crate) fn ensure_malloc<'a>(module: &mut Module<'a>) -> Result<(), String> {
     if module.malloc_declared {
         return Ok(());
     }
     let location = Location::unknown(module.context);
-    let ptr = Type::parse(module.context, "!llvm.ptr")
-        .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
     let function_type = FunctionType::new(
         module.context,
         &[IntegerType::new(module.context, 64).into()],
-        &[ptr],
+        &[IntegerType::new(module.context, 64).into()],
     );
-    let function = llvm::func(
+    let function = func::func(
         module.context,
         StringAttribute::new(module.context, "malloc"),
         TypeAttribute::new(function_type.into()),
         Region::new(),
-        &[],
+        &[(
+            Identifier::new(module.context, "sym_visibility"),
+            StringAttribute::new(module.context, "private").into(),
+        )],
         location,
     );
     module.module.body().append_operation(function);
@@ -81,17 +84,27 @@ pub(crate) fn malloc_call<'c, 'a>(
     let ptr = Type::parse(module.context, "!llvm.ptr")
         .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
     let size = integer_constant(module, block, 64, bytes, location)?;
-    let call = OperationBuilder::new("llvm.call", location)
-        .add_attributes(&[(
-            Identifier::new(module.context, "callee"),
-            FlatSymbolRefAttribute::new(module.context, "malloc").into(),
-        )])
-        .add_operands(&[size])
+
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "malloc"),
+        &[size],
+        &[IntegerType::new(module.context, 64).into()],
+        location,
+    );
+    let raw_i64: Value<'c, 'a> = block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+
+    let inttoptr = OperationBuilder::new("llvm.inttoptr", location)
+        .add_operands(&[raw_i64])
         .add_results(&[ptr])
         .build()
         .map_err(|e| e.to_string())?;
     block
-        .append_operation(call)
+        .append_operation(inttoptr)
         .result(0)
         .map_err(|e| e.to_string())
         .map(Into::into)

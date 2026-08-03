@@ -4,6 +4,7 @@ use crate::ast::*;
 use crate::types::{Monotype, TypeFunc};
 use melior::dialect::{func, llvm};
 use melior::ir::{
+    Attribute,
     attribute::{FlatSymbolRefAttribute, StringAttribute, TypeAttribute},
     operation::OperationBuilder,
     r#type::{FunctionType, IntegerType},
@@ -25,17 +26,18 @@ use super::types::lower_type;
 pub fn lower<'a>(prog: &Program, context: &'a melior::Context) -> Result<Module<'a>, String> {
     let mut module = Module::new(context);
 
-    // The entry function `@__main` is built statement by statement; the value
-    // of the last expression statement becomes its `func.return`.
     let entry_block = Block::new(&[]);
     let mut last_value: Option<Value<'a, '_>> = None;
+    let mut last_monotype: Option<Monotype> = None;
     for stmt in &prog.stmts {
         if let Some(value) = lower_stmt(stmt, &mut module, &entry_block)? {
             last_value = Some(value);
+            if let SNode::Expr(e) = &*stmt.s {
+                last_monotype = Some(e.typ.clone());
+            }
         }
     }
 
-    // Finish the entry body before moving `entry_block` into the module.
     let location = Location::unknown(context);
     let outputs: Vec<Type<'a>> = match last_value {
         Some(value) => {
@@ -49,6 +51,7 @@ pub fn lower<'a>(prog: &Program, context: &'a melior::Context) -> Result<Module<
         }
     };
 
+    module.entry_return_monotype = last_monotype;
     emit_entry_function(&mut module, entry_block, &outputs)?;
     Ok(module)
 }
@@ -107,39 +110,50 @@ pub(crate) fn lower_print_stmt<'a, 'b>(
     ensure_printf(module)?;
 
     let location = Location::unknown(module.context);
-    let call = OperationBuilder::new("llvm.call", location)
-        .add_attributes(&[(
-            Identifier::new(module.context, "callee"),
-            FlatSymbolRefAttribute::new(module.context, "printf").into(),
-        )])
+    let ptrtoint = OperationBuilder::new("llvm.ptrtoint", location)
         .add_operands(&[value])
-        .add_results(&[IntegerType::new(module.context, 32).into()])
+        .add_results(&[IntegerType::new(module.context, 64).into()])
         .build()
         .map_err(|e| e.to_string())?;
+    let arg_i64: Value = entry
+        .append_operation(ptrtoint)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "printf"),
+        &[arg_i64],
+        &[IntegerType::new(module.context, 32).into()],
+        location,
+    );
     entry.append_operation(call);
     Ok(())
 }
 
-/// Emit the external declaration `llvm.func @printf(!llvm.ptr) -> i32`
-/// exactly once.
+/// Emit the external declaration `func.func @printf(i64) -> i32` once.
+/// Uses `func.func` with only built-in types so the `func_to_llvm` pass
+/// can convert it cleanly.
 fn ensure_printf<'a>(module: &mut Module<'a>) -> Result<(), String> {
     if module.printf_declared {
         return Ok(());
     }
     let location = Location::unknown(module.context);
-    let ptr = Type::parse(module.context, "!llvm.ptr")
-        .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
     let function_type = FunctionType::new(
         module.context,
-        &[ptr],
+        &[IntegerType::new(module.context, 64).into()],
         &[IntegerType::new(module.context, 32).into()],
     );
-    let function = llvm::func(
+    let function = func::func(
         module.context,
         StringAttribute::new(module.context, "printf"),
         TypeAttribute::new(function_type.into()),
         Region::new(),
-        &[],
+        &[(
+            Identifier::new(module.context, "sym_visibility"),
+            StringAttribute::new(module.context, "private").into(),
+        )],
         location,
     );
     module.module.body().append_operation(function);
@@ -166,7 +180,10 @@ fn emit_entry_function<'a>(
         StringAttribute::new(module.context, "__main"),
         TypeAttribute::new(function_type.into()),
         region,
-        &[],
+        &[(
+            Identifier::new(module.context, "llvm.emit_c_interface"),
+            Attribute::unit(module.context),
+        )],
         location,
     );
     module.module.body().append_operation(function);

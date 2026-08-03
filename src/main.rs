@@ -36,8 +36,7 @@ fn main() {
     }
 
     match file {
-        // No program given: start the REPL with an empty context.
-        None => repl_loop(types::TypeContext::new(), codegen::new_context()),
+        None => repl_loop(None),
         Some(path) => {
             let source = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
@@ -47,7 +46,6 @@ fn main() {
                 }
             };
 
-            // Step 1: parse
             let mut prog = match Program::parse(&source) {
                 Ok(p) => {
                     println!("parse: ok");
@@ -59,15 +57,12 @@ fn main() {
                 }
             };
 
-            // Step 2: typecheck
             if let Err(e) = Program::typecheck(&mut prog) {
                 eprintln!("typecheck: error: {}", e);
                 process::exit(2);
             }
             println!("typecheck: ok");
 
-            // Step 3: codegen (MLIR). TODO: feed the module to the LLVM backend
-            // and JIT-compile it once codegen::lower is implemented.
             let context = codegen::new_context();
             match codegen::lower(&prog, &context) {
                 Ok(module) => {
@@ -90,15 +85,25 @@ fn main() {
             }
 
             if start_repl {
-                repl_loop(prog.ctx.clone(), codegen::new_context());
+                repl_loop(Some(prog));
             }
         }
     }
 }
 
-fn repl_loop(mut ctx: types::TypeContext, _mlir_ctx: melior::Context) {
+fn repl_loop(initial: Option<Box<Program>>) {
+    let mlir_ctx = codegen::new_context();
     let stdin = io::stdin();
     let mut buffer = String::new();
+
+    let mut accumulated_stmts: Vec<ast::Stmt> = match &initial {
+        Some(prog) => prog.stmts.clone(),
+        None => Vec::new(),
+    };
+    let mut ctx: types::TypeContext = match &initial {
+        Some(prog) => prog.ctx.clone(),
+        None => types::TypeContext::new(),
+    };
 
     loop {
         print!("> ");
@@ -122,19 +127,32 @@ fn repl_loop(mut ctx: types::TypeContext, _mlir_ctx: melior::Context) {
 
         match Program::parse(trimmed) {
             Err(e) => eprintln!("parse error: {}", e),
-            Ok(mut prog) => {
-                for stmt in prog.stmts.iter_mut() {
-                    // TODO(mlir): JIT-compile the statement instead of only
-                    // typechecking: codegen::lower on `stmt`, then
-                    // codegen::execute with melior's `ExecutionEngine`
-                    // (keep the Module alive across lines so bindings persist).
-                    match stmt.typecheck(&ctx) {
-                        Ok((sub, typ)) => {
-                            ctx = stmt.ctx.clone();
-                            let resolved = typ.apply(&sub);
-                            println!("  : {:?}", resolved);
-                        },
-                        Err(e) => eprintln!("type error: {}", e),
+            Ok(new_prog) => {
+                let new_count = new_prog.stmts.len();
+                accumulated_stmts.extend(new_prog.stmts);
+
+                let mut full = Box::new(ast::Program {
+                    stmts: accumulated_stmts.clone(),
+                    ctx: types::TypeContext::new(),
+                });
+
+                match Program::typecheck(&mut full) {
+                    Err(e) => {
+                        eprintln!("type error: {}", e);
+                        accumulated_stmts.truncate(accumulated_stmts.len() - new_count);
+                    }
+                    Ok(()) => {
+                        ctx = full.ctx.clone();
+                        accumulated_stmts = full.stmts.clone();
+                        match codegen::lower(&full, &mlir_ctx) {
+                            Err(e) => eprintln!("codegen error: {}", e),
+                            Ok(mut module) => {
+                                match codegen::execute(&mut module) {
+                                    Err(e) => eprintln!("execution error: {}", e),
+                                    Ok(result) => println!("  = {:?}", result),
+                                }
+                            }
+                        }
                     }
                 }
             }

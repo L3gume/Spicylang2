@@ -6,6 +6,7 @@ use melior::dialect::llvm::LoadStoreOptions;
 use melior::ir::{
     attribute::{DenseI32ArrayAttribute, FlatSymbolRefAttribute},
     operation::OperationBuilder,
+    r#type::IntegerType,
     Block, BlockLike, Identifier, Location, Type, Value,
 };
 use std::collections::HashSet;
@@ -288,11 +289,22 @@ pub(crate) fn closure_call<'c, 'a>(
     let ptr = Type::parse(module.context, "!llvm.ptr")
         .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
     let fn_ptr = load_field(module, block, closure, closure_struct, 0, ptr, location)?;
-    let env = load_field(module, block, closure, closure_struct, 1, ptr, location)?;
+    let env_ptr = load_field(module, block, closure, closure_struct, 1, ptr, location)?;
+    let env_i64: Value<'c, 'a> = block
+        .append_operation(
+            OperationBuilder::new("llvm.ptrtoint", location)
+                .add_operands(&[env_ptr])
+                .add_results(&[IntegerType::new(module.context, 64).into()])
+                .build()
+                .map_err(|e| e.to_string())?,
+        )
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
 
     let mut operands = vec![fn_ptr];
     operands.extend(args.iter().copied());
-    operands.push(env);
+    operands.push(env_i64);
     let call = OperationBuilder::new("llvm.call_indirect", location)
         .add_operands(&operands)
         .add_results(&[ret_type])

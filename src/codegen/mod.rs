@@ -22,8 +22,7 @@ mod lists;
 mod stmt;
 mod types;
 
-#[allow(unused_imports)]
-pub use execute::execute;
+pub use execute::{ExecutionResult, execute};
 pub use stmt::lower;
 
 use crate::ast::*;
@@ -61,6 +60,7 @@ pub fn new_context() -> melior::Context {
     let context = melior::Context::new();
     context.append_dialect_registry(&registry);
     context.load_all_available_dialects();
+    melior::utility::register_all_llvm_translations(&context);
     context
 }
 
@@ -133,6 +133,9 @@ pub struct Module<'a> {
     /// Enum constructors: constructor name → `(enum name, variant index,
     /// arity)`. Built when an enum is declared.
     constructors: HashMap<String, (String, usize, usize)>,
+    /// The resolved Spicylang type of the `@__main` entry function's return
+    /// value, used by the JIT to interpret the result slot.
+    entry_return_monotype: Option<Monotype>,
 }
 
 impl<'a> Module<'a> {
@@ -154,6 +157,7 @@ impl<'a> Module<'a> {
             spec_counter: 0,
             let_counter: 0,
             constructors: HashMap::new(),
+            entry_return_monotype: None,
         }
     }
 
@@ -165,5 +169,16 @@ impl<'a> Module<'a> {
     /// Print the module in MLIR textual form.
     pub fn dump(&self) -> String {
         self.module.as_operation().to_string()
+    }
+
+    /// Mutable access to the inner MLIR module (for running passes).
+    pub fn as_mlir_module_mut(&mut self) -> &mut melior::ir::Module<'a> {
+        &mut self.module
+    }
+
+    /// The resolved Spicylang type of the entry function's return value, if
+    /// any. `None` means the entry function returns unit.
+    pub fn entry_return_monotype(&self) -> Option<&Monotype> {
+        self.entry_return_monotype.as_ref()
     }
 }

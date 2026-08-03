@@ -29,9 +29,6 @@ pub(crate) fn lower_type<'a>(typ: &Monotype, module: &Module<'a>) -> Result<Type
             TypeFunc::Enum(_) => Type::parse(module.context, "!llvm.ptr")
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string()),
         },
-        // `T1 => T2` lowers to a closure pointer (a `!llvm.ptr` to a
-        // `{ fn_ptr, env }` struct), so functions are first-class values that
-        // can capture their environment.
         Monotype::TypeFuncApplication(f, args) if matches!(**f, TypeFunc::Fn) => {
             if args.len() != 2 {
                 return Err(format!(
@@ -42,14 +39,12 @@ pub(crate) fn lower_type<'a>(typ: &Monotype, module: &Module<'a>) -> Result<Type
             Type::parse(module.context, "!llvm.ptr")
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())
         }
-        // `list T` is a pointer to a cons cell `{ head: T, tail: !llvm.ptr }`.
         Monotype::TypeFuncApplication(f, args)
             if matches!(**f, TypeFunc::List) && args.len() == 1 =>
         {
             Type::parse(module.context, "!llvm.ptr")
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())
         }
-        // `E t1 ... tn` is a pointer to `{ disc: i32, data: !llvm.ptr }`.
         Monotype::TypeFuncApplication(f, _) if matches!(**f, TypeFunc::Enum(_)) => {
             Type::parse(module.context, "!llvm.ptr")
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())
