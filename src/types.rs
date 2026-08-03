@@ -528,11 +528,52 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
     Ok(())
 }
 
+/// Reject non-exhaustive `match`es.
+///
+/// A variable pattern covers everything. Otherwise the scrutinee type decides
+/// what must be covered: a `bool` needs both `true` and `false`, and a `list`
+/// needs both `[]` and a cons pattern. Every other scrutinee type has
+/// infinitely many (or unenumerable) values, so a catch-all is required.
+fn check_exhaustive(match_t : &Monotype, cases : &[MatchCase]) -> Result<(), UnificationError> {
+    if cases.iter().any(|c| matches!(&*c.val.e, ENode::Variable(_))) {
+        return Ok(());
+    }
+    match match_t {
+        Monotype::TypeFuncApplication(f, _) if **f == TypeFunc::Bool => {
+            let has_true = cases.iter().any(|c| matches!(&*c.val.e, ENode::Literal(l) if matches!(&**l, Lit::Bool(true))));
+            let has_false = cases.iter().any(|c| matches!(&*c.val.e, ENode::Literal(l) if matches!(&**l, Lit::Bool(false))));
+            if has_true && has_false {
+                Ok(())
+            } else {
+                Err(UnificationError { message: format!("Match on `bool` is not exhaustive: cover both `true` and `false`") })
+            }
+        },
+        Monotype::TypeFuncApplication(f, _) if **f == TypeFunc::List => {
+            let covers_empty = cases.iter().any(|c| matches!(&*c.val.e, ENode::List(es) if es.is_empty()));
+            let covers_nonempty = cases.iter().any(|c| matches!(&*c.val.e, ENode::Cons(..)));
+            if covers_empty && covers_nonempty {
+                Ok(())
+            } else {
+                Err(UnificationError { message: format!("Match on a list is not exhaustive: cover both `[]` and a `x::xs` pattern") })
+            }
+        },
+        _ => Err(UnificationError { message: format!("Match on {:?} is not exhaustive: add a catch-all variable pattern", match_t) }),
+    }
+}
+
 /*
 * Bottom-Up algo
 */
-pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution, Monotype), UnificationError> {
-    match &*expr.e {
+pub fn algo_w(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substitution, Monotype), UnificationError> {
+    let result = algo_w_inner(context, expr);
+    if let Ok((_, typ)) = &result {
+        expr.typ = typ.clone();
+    }
+    result
+}
+
+fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substitution, Monotype), UnificationError> {
+    match &mut *expr.e {
         ENode::Variable(name) => match context.get(name) {
             Some(poly) => {
                 Ok((Substitution::new(), poly.instantiate(context, None)))
@@ -596,7 +637,7 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
         ENode::Block(stmts, exp) => {
             let mut combined = Substitution::new();
             for s in stmts {
-                match &*s.s {
+                match &mut *s.s {
                     SNode::Decl(e1, t1, e2) => {
                         let var_name = match &*e1.e {
                             ENode::Variable(name) => name.clone(),
@@ -646,11 +687,11 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                 let tv = Monotype::var(context.new_typevar());
                 Ok((Substitution::new(), Monotype::list(tv)))
             } else {
-                let (s0, t0) = algo_w(context, &exps[0])?;
+                let (s0, t0) = algo_w(context, &mut exps[0])?;
                 *context = context.apply(&s0);
                 let mut combined = s0;
                 let mut elem_type = t0;
-                for e in &exps[1..] {
+                for e in exps[1..].iter_mut() {
                     let (s_i, t_i) = algo_w(context, e)?;
                     *context = context.apply(&s_i);
                     combined = combined.combine(s_i);
@@ -676,7 +717,7 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
             let mut match_t = t0;
             let mut combined = s0;
             let ret = Monotype::var(context.new_typevar());
-            for MatchCase { val: e1, exp: e2 } in cases {
+            for MatchCase { val: e1, exp: e2 } in cases.iter_mut() {
                 let mut case_ctx = context.apply(&combined);
                 let s1 = type_pattern(&mut case_ctx, e1, &match_t)?;
                 combined = combined.combine(s1);
@@ -690,6 +731,7 @@ pub fn algo_w(context : &mut TypeContext, expr : &Expr) -> Result<(Substitution,
                 combined = combined.combine(s_u);
                 match_t = match_t.apply(&combined);
             }
+            check_exhaustive(&match_t, cases)?;
             let resolved_ret = ret.apply(&combined);
             Ok((combined, resolved_ret))
         },
@@ -1500,49 +1542,49 @@ mod tests {
     #[test]
     fn w_literal_int() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &lit(Lit::Int(42)));
+        let result = algo_w(&mut ctx, &mut lit(Lit::Int(42)));
         assert_eq!(result, Ok((Substitution::new(), int())));
     }
 
     #[test]
     fn w_literal_bool() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &lit(Lit::Bool(true)));
+        let result = algo_w(&mut ctx, &mut lit(Lit::Bool(true)));
         assert_eq!(result, Ok((Substitution::new(), bool())));
     }
 
     #[test]
     fn w_literal_str() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &lit(Lit::Str("hi".to_string())));
+        let result = algo_w(&mut ctx, &mut lit(Lit::Str("hi".to_string())));
         assert_eq!(result, Ok((Substitution::new(), Monotype::string())));
     }
 
     #[test]
     fn w_literal_float() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &lit(Lit::Float(1.5)));
+        let result = algo_w(&mut ctx, &mut lit(Lit::Float(1.5)));
         assert_eq!(result, Ok((Substitution::new(), Monotype::float())));
     }
 
     #[test]
     fn w_literal_unit() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &lit(Lit::Unit));
+        let result = algo_w(&mut ctx, &mut lit(Lit::Unit));
         assert_eq!(result, Ok((Substitution::new(), Monotype::unit())));
     }
 
     #[test]
     fn w_var_in_context() {
         let mut ctx = ctx_with(vec![("x", mono(int()))]);
-        let result = algo_w(&mut ctx, &v("x"));
+        let result = algo_w(&mut ctx, &mut v("x"));
         assert_eq!(result, Ok((Substitution::new(), int())));
     }
 
     #[test]
     fn w_var_poly() {
         let mut ctx = ctx_with(vec![("id", forall("a", mono(fn_type(var("a"), var("a")))))]);
-        let result = algo_w(&mut ctx, &v("id"));
+        let result = algo_w(&mut ctx, &mut v("id"));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, fn_type(var("t0"), var("t0")));
@@ -1551,7 +1593,7 @@ mod tests {
     #[test]
     fn w_var_undefined() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &v("x"));
+        let result = algo_w(&mut ctx, &mut v("x"));
         assert!(result.is_err());
     }
 
@@ -1560,7 +1602,7 @@ mod tests {
     #[test]
     fn w_list_empty() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &list(vec![]));
+        let result = algo_w(&mut ctx, &mut list(vec![]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert!(matches!(typ, Monotype::TypeFuncApplication(f, _) if *f == TypeFunc::List));
@@ -1569,7 +1611,7 @@ mod tests {
     #[test]
     fn w_list_int() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &list(vec![lit(Lit::Int(1)), lit(Lit::Int(2))]));
+        let result = algo_w(&mut ctx, &mut list(vec![lit(Lit::Int(1)), lit(Lit::Int(2))]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, Monotype::list(Monotype::int()));
@@ -1578,7 +1620,7 @@ mod tests {
     #[test]
     fn w_list_bool() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &list(vec![lit(Lit::Bool(true)), lit(Lit::Bool(false))]));
+        let result = algo_w(&mut ctx, &mut list(vec![lit(Lit::Bool(true)), lit(Lit::Bool(false))]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, Monotype::list(Monotype::bool()));
@@ -1587,14 +1629,14 @@ mod tests {
     #[test]
     fn w_list_mixed_type_error() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &list(vec![lit(Lit::Int(1)), lit(Lit::Bool(true))]));
+        let result = algo_w(&mut ctx, &mut list(vec![lit(Lit::Int(1)), lit(Lit::Bool(true))]));
         assert!(result.is_err());
     }
 
     #[test]
     fn w_list_single() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &list(vec![lit(Lit::Float(3.14))]));
+        let result = algo_w(&mut ctx, &mut list(vec![lit(Lit::Float(3.14))]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, Monotype::list(Monotype::float()));
@@ -1603,7 +1645,7 @@ mod tests {
     #[test]
     fn w_cons_int_nil() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &cons(lit(Lit::Int(1)), list(vec![])));
+        let result = algo_w(&mut ctx, &mut cons(lit(Lit::Int(1)), list(vec![])));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, Monotype::list(Monotype::int()));
@@ -1612,7 +1654,7 @@ mod tests {
     #[test]
     fn w_cons_nested() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &cons(lit(Lit::Int(1)), cons(lit(Lit::Int(2)), list(vec![]))));
+        let result = algo_w(&mut ctx, &mut cons(lit(Lit::Int(1)), cons(lit(Lit::Int(2)), list(vec![]))));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, Monotype::list(Monotype::int()));
@@ -1621,14 +1663,14 @@ mod tests {
     #[test]
     fn w_cons_head_type_mismatch() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &cons(lit(Lit::Int(1)), cons(lit(Lit::Bool(true)), list(vec![]))));
+        let result = algo_w(&mut ctx, &mut cons(lit(Lit::Int(1)), cons(lit(Lit::Bool(true)), list(vec![]))));
         assert!(result.is_err());
     }
 
     #[test]
     fn w_cons_tail_not_list() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &cons(lit(Lit::Int(1)), lit(Lit::Int(2))));
+        let result = algo_w(&mut ctx, &mut cons(lit(Lit::Int(1)), lit(Lit::Int(2))));
         assert!(result.is_err());
     }
 
@@ -1636,7 +1678,7 @@ mod tests {
     fn w_cons_polymorphic() {
         let mut ctx = TypeContext::new();
         ctx.add("x".to_string(), Polytype::Mono(Box::new(var("a"))));
-        let result = algo_w(&mut ctx, &cons(v("x"), list(vec![])));
+        let result = algo_w(&mut ctx, &mut cons(v("x"), list(vec![])));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, Monotype::list(var("a")));
@@ -1646,7 +1688,7 @@ mod tests {
     fn w_list_with_variable() {
         let mut ctx = TypeContext::new();
         ctx.add("x".to_string(), Polytype::Mono(Box::new(Monotype::int())));
-        let result = algo_w(&mut ctx, &list(vec![v("x"), v("x")]));
+        let result = algo_w(&mut ctx, &mut list(vec![v("x"), v("x")]));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, Monotype::list(Monotype::int()));
@@ -1655,7 +1697,7 @@ mod tests {
     #[test]
     fn w_abstraction_identity() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &lam_infer("x", v("x")));
+        let result = algo_w(&mut ctx, &mut lam_infer("x", v("x")));
         assert!(result.is_ok());
         let (sub, typ) = result.unwrap();
         assert_eq!(sub, Substitution::new());
@@ -1665,14 +1707,14 @@ mod tests {
     #[test]
     fn w_abstraction_annotated() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &lam_annot("x", int(), v("x")));
+        let result = algo_w(&mut ctx, &mut lam_annot("x", int(), v("x")));
         assert_eq!(result, Ok((Substitution::new(), fn_type(int(), int()))));
     }
 
     #[test]
     fn w_abstraction_closure() {
         let mut ctx = ctx_with(vec![("y", mono(bool()))]);
-        let result = algo_w(&mut ctx, &lam_infer("x", v("y")));
+        let result = algo_w(&mut ctx, &mut lam_infer("x", v("y")));
         assert!(result.is_ok());
         let (sub, typ) = result.unwrap();
         assert_eq!(sub, Substitution::new());
@@ -1682,7 +1724,7 @@ mod tests {
     #[test]
     fn w_application_id_to_int() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &app(lam_infer("x", v("x")), lit(Lit::Int(5))));
+        let result = algo_w(&mut ctx, &mut app(lam_infer("x", v("x")), lit(Lit::Int(5))));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, int());
@@ -1691,7 +1733,7 @@ mod tests {
     #[test]
     fn w_let_simple() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &let_in("x", lit(Lit::Int(5)), v("x")));
+        let result = algo_w(&mut ctx, &mut let_in("x", lit(Lit::Int(5)), v("x")));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, int());
@@ -1700,7 +1742,7 @@ mod tests {
     #[test]
     fn w_let_polymorphic_id() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &let_in("id", lam_infer("x", v("x")), app(v("id"), lit(Lit::Int(5)))));
+        let result = algo_w(&mut ctx, &mut let_in("id", lam_infer("x", v("x")), app(v("id"), lit(Lit::Int(5)))));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, int());
@@ -1709,7 +1751,7 @@ mod tests {
     #[test]
     fn w_if_else_int() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Int(2))));
+        let result = algo_w(&mut ctx, &mut if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Int(2))));
         assert!(result.is_ok());
         let (_sub, typ) = result.unwrap();
         assert_eq!(typ, int());
@@ -1718,14 +1760,14 @@ mod tests {
     #[test]
     fn w_if_else_cond_not_bool() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &if_else(lit(Lit::Int(1)), lit(Lit::Int(2)), lit(Lit::Int(3))));
+        let result = algo_w(&mut ctx, &mut if_else(lit(Lit::Int(1)), lit(Lit::Int(2)), lit(Lit::Int(3))));
         assert!(result.is_err());
     }
 
     #[test]
     fn w_if_else_branches_mismatch() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Bool(false))));
+        let result = algo_w(&mut ctx, &mut if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Bool(false))));
         assert!(result.is_err());
     }
 
@@ -1734,42 +1776,42 @@ mod tests {
     #[test]
     fn w_negate_int() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Int(5))));
+        let result = algo_w(&mut ctx, &mut unary(UnaryOp::Negate, lit(Lit::Int(5))));
         assert_eq!(result, Ok((Substitution::new(), int())));
     }
 
     #[test]
     fn w_negate_float() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Float(3.14))));
+        let result = algo_w(&mut ctx, &mut unary(UnaryOp::Negate, lit(Lit::Float(3.14))));
         assert_eq!(result, Ok((Substitution::new(), Monotype::float())));
     }
 
     #[test]
     fn w_negate_string_error() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &unary(UnaryOp::Negate, lit(Lit::Str("hi".to_string()))));
+        let result = algo_w(&mut ctx, &mut unary(UnaryOp::Negate, lit(Lit::Str("hi".to_string()))));
         assert!(result.is_err());
     }
 
     #[test]
     fn w_not_bool() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Bool(true))));
+        let result = algo_w(&mut ctx, &mut unary(UnaryOp::Not, lit(Lit::Bool(true))));
         assert_eq!(result, Ok((Substitution::new(), bool())));
     }
 
     #[test]
     fn w_not_int_error() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Int(5))));
+        let result = algo_w(&mut ctx, &mut unary(UnaryOp::Not, lit(Lit::Int(5))));
         assert!(result.is_err());
     }
 
     #[test]
     fn w_not_string_error() {
         let mut ctx = TypeContext::new();
-        let result = algo_w(&mut ctx, &unary(UnaryOp::Not, lit(Lit::Str("hi".to_string()))));
+        let result = algo_w(&mut ctx, &mut unary(UnaryOp::Not, lit(Lit::Str("hi".to_string()))));
         assert!(result.is_err());
     }
 
@@ -2108,7 +2150,7 @@ mod tests {
     #[test]
     fn w_and_m_agree_literal_int() {
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &lit(Lit::Int(42))).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut lit(Lit::Int(42))).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();
@@ -2118,10 +2160,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_abstraction_identity() {
-        let expr = lam_infer("x", v("x"));
+        let mut expr = lam_infer("x", v("x"));
 
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();
@@ -2131,10 +2173,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_annotated_abstraction() {
-        let expr = lam_annot("x", int(), v("x"));
+        let mut expr = lam_annot("x", int(), v("x"));
 
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();
@@ -2144,10 +2186,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_application() {
-        let expr = app(lam_infer("x", v("x")), lit(Lit::Int(5)));
+        let mut expr = app(lam_infer("x", v("x")), lit(Lit::Int(5)));
 
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();
@@ -2157,10 +2199,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_let() {
-        let expr = let_in("x", lit(Lit::Int(5)), v("x"));
+        let mut expr = let_in("x", lit(Lit::Int(5)), v("x"));
 
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();
@@ -2170,10 +2212,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_if_else() {
-        let expr = if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Int(2)));
+        let mut expr = if_else(lit(Lit::Bool(true)), lit(Lit::Int(1)), lit(Lit::Int(2)));
 
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();
@@ -2183,10 +2225,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_mismatch_rejected() {
-        let expr = lit(Lit::Int(42));
+        let mut expr = lit(Lit::Int(42));
 
         let mut ctx_w = TypeContext::new();
-        let (_sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (_sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         // typ_w is Int; pass Bool to algo_m — should fail
         let mut ctx_m = TypeContext::new();
         let result_m = algo_m(&mut ctx_m, &expr, &bool());
@@ -2195,10 +2237,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_polymorphic_let() {
-        let expr = let_in("id", lam_infer("x", v("x")), app(v("id"), lit(Lit::Int(5))));
+        let mut expr = let_in("id", lam_infer("x", v("x")), app(v("id"), lit(Lit::Int(5))));
 
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();
@@ -2208,10 +2250,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_negate_int() {
-        let expr = unary(UnaryOp::Negate, lit(Lit::Int(42)));
+        let mut expr = unary(UnaryOp::Negate, lit(Lit::Int(42)));
 
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();
@@ -2221,10 +2263,10 @@ mod tests {
 
     #[test]
     fn w_and_m_agree_not_bool() {
-        let expr = unary(UnaryOp::Not, lit(Lit::Bool(true)));
+        let mut expr = unary(UnaryOp::Not, lit(Lit::Bool(true)));
 
         let mut ctx_w = TypeContext::new();
-        let (sub_w, typ_w) = algo_w(&mut ctx_w, &expr).unwrap();
+        let (sub_w, typ_w) = algo_w(&mut ctx_w, &mut expr).unwrap();
         let resolved = typ_w.apply(&sub_w);
 
         let mut ctx_m = TypeContext::new();

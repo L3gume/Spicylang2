@@ -13,7 +13,7 @@ impl Pos {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
     Int(i32),
     Float(f32),
@@ -27,7 +27,7 @@ pub struct Type {
     pub t: Monotype
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Binding(pub String, pub Box<Type>);
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,7 +48,7 @@ pub struct TypeHeader {
     pub tvars : Vec<String>
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SNode {
     Decl(Box<Expr>, Box<Type>, Box<Expr>),  // let x [: Type] = e;
     Expr(Box<Expr>),                        // e; special case, not always ()
@@ -56,7 +56,7 @@ pub enum SNode {
     TypeDecl(TypeHeader, Box<TypeDec>) // name <type vars> = <type>
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Stmt {
     pub s : Box<SNode>,
     pub ctx : TypeContext,
@@ -75,7 +75,7 @@ impl Stmt {
 
     pub fn typecheck(&mut self, ctx : &TypeContext) -> Result<(Substitution, Monotype), UnificationError> {
         let mut context = ctx.clone();
-        match &*self.s {
+        let (combined, typ) = match &mut *self.s {
             SNode::Decl(e1, t1, e2) => {
                 let var_name = match &*e1.e {
                     ENode::Variable(name) => name.clone(),
@@ -96,12 +96,12 @@ impl Stmt {
                 let generalized = context.generalise(&resolved_typ);
                 context.add(var_name, generalized);
                 self.ctx = context;
-                Ok((combined, resolved_typ))
+                (combined, resolved_typ)
             },
             SNode::Expr(e1) => {
                 let (sub, typ) = algo_w(&mut context, e1)?;
                 self.ctx = context.apply(&sub);
-                Ok((sub, typ))
+                (sub, typ)
             },
             SNode::Print(e1) => {
                 let (s1, t1) = algo_w(&mut context, e1)?;
@@ -109,18 +109,20 @@ impl Stmt {
                 let combined = s1.combine(s2);
                 context = context.apply(&combined);
                 self.ctx = context;
-                Ok((combined, Monotype::unit()))
+                (combined, Monotype::unit())
             },
             SNode::TypeDecl(header, dec) => {
                 handle_type_decl(header, dec, &mut context)?;
                 self.ctx = context;
-                Ok((Substitution::new(), Monotype::unit()))
+                (Substitution::new(), Monotype::unit())
             }
-        }
+        };
+        resolve_stmt_types(self, &combined);
+        Ok((combined, typ))
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ENode {
     Variable(String),
     Literal(Box<Lit>),
@@ -138,11 +140,98 @@ pub enum ENode {
     Match(Box<Expr>, Vec<MatchCase>)
 }
 
-#[derive(Debug, PartialEq)]
+/// Apply `sub` to the recorded (`algo_w`-annotated) type of every expression
+/// reachable from `stmt`. Runs after a statement is type-checked, once the
+/// statement's full substitution is known, resolving inferred types into
+/// concrete ones. Type variables bound by a generalized `let` are resolved
+/// too: codegen targets monomorphic MLIR, so each instantiation is specialized
+/// at its use site rather than kept polymorphic.
+pub fn resolve_stmt_types(stmt : &mut Stmt, sub : &Substitution) {
+    match &mut *stmt.s {
+        SNode::Decl(e1, _, e2) => {
+            resolve_expr_types(e1, sub);
+            resolve_expr_types(e2, sub);
+        },
+        SNode::Expr(e1) => resolve_expr_types(e1, sub),
+        SNode::Print(e1) => resolve_expr_types(e1, sub),
+        SNode::TypeDecl(_, _) => {}
+    }
+}
+
+/// Apply `sub` to the recorded type of `expr` and everything reachable from
+/// it. Used by codegen to specialize a lambda body: the definition statement
+/// may leave free type variables (e.g. a recursive use), which the
+/// instantiation's substitution replaces with concrete types.
+pub fn apply_substitution(expr : &mut Expr, sub : &Substitution) {
+    resolve_expr_types(expr, sub);
+}
+
+fn resolve_expr_types(expr : &mut Expr, sub : &Substitution) {
+    expr.typ = expr.typ.apply(sub);
+    match &mut *expr.e {
+        ENode::Variable(_) | ENode::Literal(_) => {}
+        ENode::Abstraction(_, body) => resolve_expr_types(body, sub),
+        ENode::Application(f, x) => {
+            resolve_expr_types(f, sub);
+            resolve_expr_types(x, sub);
+        },
+        ENode::Let(_, e1, e2) => {
+            resolve_expr_types(e1, sub);
+            resolve_expr_types(e2, sub);
+        },
+        ENode::IfElse(c, t, e) => {
+            resolve_expr_types(c, sub);
+            resolve_expr_types(t, sub);
+            resolve_expr_types(e, sub);
+        },
+        ENode::Block(stmts, e) => {
+            for s in stmts.iter_mut() {
+                resolve_stmt_types(s, sub);
+            }
+            resolve_expr_types(e, sub);
+        },
+        ENode::Comparison(_, a, b) => {
+            resolve_expr_types(a, sub);
+            resolve_expr_types(b, sub);
+        },
+        ENode::Arithmetic(_, a, b) => {
+            resolve_expr_types(a, sub);
+            resolve_expr_types(b, sub);
+        },
+        ENode::Logical(_, a, b) => {
+            resolve_expr_types(a, sub);
+            resolve_expr_types(b, sub);
+        },
+        ENode::Unary(_, e) => resolve_expr_types(e, sub),
+        ENode::List(es) => {
+            for e in es.iter_mut() {
+                resolve_expr_types(e, sub);
+            }
+        },
+        ENode::Cons(h, t) => {
+            resolve_expr_types(h, sub);
+            resolve_expr_types(t, sub);
+        },
+        ENode::Match(scrut, cases) => {
+            resolve_expr_types(scrut, sub);
+            for c in cases.iter_mut() {
+                resolve_expr_types(&mut c.val, sub);
+                resolve_expr_types(&mut c.exp, sub);
+            }
+        },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Expr {
     pub e : Box<ENode>,
     pub ctx : TypeContext,
-    pub pos : Pos
+    pub pos : Pos,
+    /// The inferred type of this expression: filled with the raw type during
+    /// typechecking (`algo_w`) and resolved by the post-typecheck pass
+    /// ([`resolve_stmt_types`]) once the statement's full substitution is
+    /// known.
+    pub typ : Monotype,
 }
 
 impl Expr {
@@ -150,12 +239,13 @@ impl Expr {
         Expr {
             e : Box::new(node),
             ctx : TypeContext::new(),
-            pos : Pos::nil()
+            pos : Pos::nil(),
+            typ : Monotype::infer(),
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MatchCase {
     pub val : Box<Expr>,
     pub exp : Box<Expr>
@@ -1025,6 +1115,52 @@ mod tests {
     }
 
     #[test]
+    fn resolved_types_annotated_lambda() {
+        let mut p = parse("let id = \\(x : int) => x;");
+        Program::typecheck(&mut p).unwrap();
+        let SNode::Decl(_, _, lambda) = &*p.stmts[0].s else {
+            panic!("expected Decl");
+        };
+        // The abstraction's resolved type, recorded by the post-pass.
+        assert_eq!(
+            lambda.typ,
+            Monotype::func(vec![Monotype::int(), Monotype::int()])
+        );
+        // Its body `x` resolves to the parameter type.
+        let ENode::Abstraction(_, body) = &*lambda.e else {
+            panic!("expected Abstraction");
+        };
+        assert_eq!(body.typ, Monotype::int());
+    }
+
+    #[test]
+    fn resolved_types_arithmetic() {
+        let mut p = parse("let y = 1 + 2;");
+        Program::typecheck(&mut p).unwrap();
+        let SNode::Decl(_, _, rhs) = &*p.stmts[0].s else {
+            panic!("expected Decl");
+        };
+        assert_eq!(rhs.typ, Monotype::int());
+    }
+
+    #[test]
+    fn resolved_types_within_statement() {
+        // `\x => x` is unannotated, but the use site fixes its type to int.
+        let mut p = parse("let apply = \\(f : int => int) => f;");
+        Program::typecheck(&mut p).unwrap();
+        let SNode::Decl(_, _, lambda) = &*p.stmts[0].s else {
+            panic!("expected Decl");
+        };
+        assert_eq!(
+            lambda.typ,
+            Monotype::func(vec![
+                Monotype::func(vec![Monotype::int(), Monotype::int()]),
+                Monotype::func(vec![Monotype::int(), Monotype::int()]),
+            ])
+        );
+    }
+
+    #[test]
     fn typecheck_int_literal() {
         let mut p = parse("42;");
         assert!(Program::typecheck(&mut p).is_ok());
@@ -1069,6 +1205,44 @@ mod tests {
     #[test]
     fn typecheck_print_non_string() {
         let mut p = parse("print 42;");
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    // ---- Match exhaustiveness ----
+
+    #[test]
+    fn match_non_exhaustive_int_rejected() {
+        let mut p = parse("match 1 | 0 => 1 | 1 => 2;");
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn match_int_with_catch_all_accepted() {
+        let mut p = parse("match 1 | 0 => 1 | x => x;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn match_bool_exhaustive() {
+        let mut p = parse("match true | true => 1 | false => 2;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn match_bool_incomplete_rejected() {
+        let mut p = parse("match true | true => 1;");
+        assert!(Program::typecheck(&mut p).is_err());
+    }
+
+    #[test]
+    fn match_list_exhaustive() {
+        let mut p = parse("match [1] | [] => 0 | x::xs => 1;");
+        assert!(Program::typecheck(&mut p).is_ok());
+    }
+
+    #[test]
+    fn match_list_incomplete_rejected() {
+        let mut p = parse("match [1] | [] => 0;");
         assert!(Program::typecheck(&mut p).is_err());
     }
 

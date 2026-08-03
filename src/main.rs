@@ -37,7 +37,7 @@ fn main() {
 
     match file {
         // No program given: start the REPL with an empty context.
-        None => repl_loop(types::TypeContext::new()),
+        None => repl_loop(types::TypeContext::new(), codegen::new_context()),
         Some(path) => {
             let source = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
@@ -68,7 +68,8 @@ fn main() {
 
             // Step 3: codegen (MLIR). TODO: feed the module to the LLVM backend
             // and JIT-compile it once codegen::lower is implemented.
-            match codegen::lower(&prog) {
+            let context = codegen::new_context();
+            match codegen::lower(&prog, &context) {
                 Ok(module) => {
                     println!(
                         "codegen: ok ({} top-level functions)",
@@ -77,7 +78,6 @@ fn main() {
                     if dump_mlir {
                         println!("{}", module.dump());
                     }
-                    // TODO: actual compilation
                 },
                 Err(e) => {
                     eprintln!("codegen: error: {}", e);
@@ -90,13 +90,13 @@ fn main() {
             }
 
             if start_repl {
-                repl_loop(prog.ctx.clone());
+                repl_loop(prog.ctx.clone(), codegen::new_context());
             }
         }
     }
 }
 
-fn repl_loop(mut ctx: types::TypeContext) {
+fn repl_loop(mut ctx: types::TypeContext, _mlir_ctx: melior::Context) {
     let stdin = io::stdin();
     let mut buffer = String::new();
 

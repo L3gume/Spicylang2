@@ -1,0 +1,65 @@
+//! Type mapping to MLIR types.
+
+use crate::types::{Monotype, TypeFunc};
+use melior::ir::r#type::IntegerType;
+use melior::ir::Type;
+
+use super::Module;
+
+// ----------------------------------------------------------------------------
+// Types
+// ----------------------------------------------------------------------------
+
+/// Map a [`Monotype`] to an `mlir::ir::Type`.
+///
+pub(crate) fn lower_type<'a>(typ: &Monotype, module: &Module<'a>) -> Result<Type<'a>, String> {
+    match typ {
+        Monotype::TypeFuncApplication(f, args) if args.is_empty() => match **f {
+            TypeFunc::Int => Ok(IntegerType::new(module.context, 32).into()),
+            TypeFunc::Float => Ok(Type::float32(module.context)),
+            TypeFunc::Bool => Ok(IntegerType::new(module.context, 1).into()),
+            TypeFunc::Str => Type::parse(module.context, "!llvm.ptr")
+                .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string()),
+            TypeFunc::Unit => Ok(IntegerType::new(module.context, 32).into()),
+            TypeFunc::Infer => Err(
+                "codegen: cannot lower an unresolved (inferred) type".to_string(),
+            ),
+            TypeFunc::Fn => Err("codegen: function type lowering not implemented".to_string()),
+            TypeFunc::List => Err("codegen: list type lowering not implemented".to_string()),
+            TypeFunc::Enum(_) => Type::parse(module.context, "!llvm.ptr")
+                .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string()),
+        },
+        // `T1 => T2` lowers to a closure pointer (a `!llvm.ptr` to a
+        // `{ fn_ptr, env }` struct), so functions are first-class values that
+        // can capture their environment.
+        Monotype::TypeFuncApplication(f, args) if matches!(**f, TypeFunc::Fn) => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "codegen: cannot lower a function type with {} argument(s)",
+                    args.len() - 1
+                ));
+            }
+            Type::parse(module.context, "!llvm.ptr")
+                .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())
+        }
+        // `list T` is a pointer to a cons cell `{ head: T, tail: !llvm.ptr }`.
+        Monotype::TypeFuncApplication(f, args)
+            if matches!(**f, TypeFunc::List) && args.len() == 1 =>
+        {
+            Type::parse(module.context, "!llvm.ptr")
+                .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())
+        }
+        // `E t1 ... tn` is a pointer to `{ disc: i32, data: !llvm.ptr }`.
+        Monotype::TypeFuncApplication(f, _) if matches!(**f, TypeFunc::Enum(_)) => {
+            Type::parse(module.context, "!llvm.ptr")
+                .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())
+        }
+        Monotype::TypeFuncApplication(_, args) => Err(format!(
+            "codegen: type lowering not implemented for application with {} argument(s)",
+            args.len()
+        )),
+        Monotype::TypeVariable(v) => {
+            Err(format!("codegen: cannot lower type variable `{}`", v))
+        }
+    }
+}
