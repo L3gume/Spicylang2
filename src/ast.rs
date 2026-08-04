@@ -1,4 +1,6 @@
+use crate::prelude::get_prelude;
 use crate::types::*;
+use crate::prelude;
 use crate::grammar;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -292,6 +294,13 @@ pub struct Program {
 impl Program {
     pub fn parse(buf : &str) -> Result<Box<Program>, String> {
         grammar::ProgParser::new().parse(buf).map_err(|e| format!("{}", e))
+    }
+
+    pub fn parse_with_prelude(buf : &str) -> Result<Box<Program>, String> {
+        let mut program = Self::parse(buf)?;
+        let prelude = get_prelude();
+        program.stmts.splice(0..0, prelude.iter().cloned());
+        Ok(program)
     }
 
     pub fn typecheck(prog : &mut Program) -> Result<(), UnificationError> {

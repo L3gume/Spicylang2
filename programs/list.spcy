@@ -12,7 +12,7 @@ let map = \fn ls => match ls
 
 let lfold = \fn acc ls => match ls
     | [] => acc
-    | x::xs => lfold fn (fn acc x) xs;
+    | x::xs => lfold fn (fn acc x) ls;
 
 let add = \x y => x + y;
 

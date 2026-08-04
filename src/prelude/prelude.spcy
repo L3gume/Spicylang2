@@ -1,0 +1,58 @@
+let odd = \(i : int) => match i % 2
+    | 0 => false
+    | _ => true;
+let even = \(i : int) => !(odd i);
+
+# iterate fn: 'a -> unit over all elements
+let iter = \fn ls => match ls
+    | [] => ()
+    | x::xs => {
+        let unit = fn x;
+        iter fn xs
+    };
+
+# map elements of list to another list
+let map = \fn ls => match ls
+    | [] => []
+    | x::xs => (fn x)::(map fn xs);
+
+# left fold
+let lfold = \fn acc ls => match ls
+    | [] => acc
+    | x::xs => lfold fn (fn acc x) xs;
+
+# right fold
+let rfold = \fn init ls => match ls
+    | [] => init
+    | x::xs => fn x (rfold fn init xs);
+
+# reverse for lists
+let rev = \ls =>
+    let aux = (\acc x => x::acc) in
+    lfold aux [] ls;
+
+# filter
+let filter = \pred ls => match ls
+    | [] => []
+    | x::xs => (
+        if (pred x) then
+            x::(filter pred xs)
+        else
+            filter pred xs
+    );
+
+# tail-recursive filter
+let tfilter = \pred ls =>
+    let aux = (\acc ls => match ls
+        | [] => rev acc
+        | x::xs => aux (if pred x then x::acc else acc) xs)
+    in
+    aux [] ls;
+
+# append (tail recursive)
+let append = \ls1 ls2 =>
+    let aux = (\acc l => match l
+    | [] => acc
+    | x::xs => aux (x::acc) xs)
+    in
+    aux ls2 (rev ls1);
