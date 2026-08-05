@@ -251,7 +251,7 @@ use spicylang2::types::*;
 
     #[test]
     fn block_with_print() {
-        let p = parse(r#"{ print "hi"; 42 };"#);
+        let p = parse(r#"{ print "hi" };"#);
         let block = match &*first(&p).s {
             SNode::Expr(e) => &*e.e,
             _ => panic!("expected Expr"),
@@ -259,9 +259,8 @@ use spicylang2::types::*;
         let ENode::Block(stmts, expr) = block else {
             panic!("expected Block");
         };
-        assert_eq!(stmts.len(), 1);
-        assert!(matches!(&*stmts[0].s, SNode::Print(..)));
-        assert_eq!(&*expr.e, &ENode::Literal(Box::new(Lit::Int(42))));
+        assert!(stmts.is_empty());
+        assert!(matches!(&*expr.e, ENode::Application(..)));
     }
 
     // ---- Abstraction ----
@@ -527,7 +526,10 @@ use spicylang2::types::*;
         let p = parse("print x;");
         assert_eq!(
             &*first(&p).s,
-            &SNode::Print(Box::new(Expr::from(ENode::Variable("x".to_string()))))
+            &SNode::Expr(Box::new(Expr::from(ENode::Application(
+                Box::new(Expr::from(ENode::Variable("print".to_string()))),
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            ))))
         );
     }
 
@@ -536,7 +538,10 @@ use spicylang2::types::*;
         let p = parse("print 42;");
         assert_eq!(
             &*first(&p).s,
-            &SNode::Print(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))))
+            &SNode::Expr(Box::new(Expr::from(ENode::Application(
+                Box::new(Expr::from(ENode::Variable("print".to_string()))),
+                Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(42))))),
+            ))))
         );
     }
 
@@ -649,7 +654,7 @@ use spicylang2::types::*;
         let p = parse("let x = 1; print x; x;");
         assert_eq!(p.stmts.len(), 3);
         assert!(matches!(&*first(&p).s, SNode::Decl(..)));
-        assert!(matches!(&*p.stmts[1].s, SNode::Print(..)));
+        assert!(matches!(&*p.stmts[1].s, SNode::Expr(..)));
         assert!(matches!(&*p.stmts[2].s, SNode::Expr(..)));
     }
 

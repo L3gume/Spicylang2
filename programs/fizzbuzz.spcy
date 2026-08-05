@@ -12,11 +12,11 @@ let for_n = \n fn =>
 # fizzbuzz impl
 let fizzbuzz = \n =>
     if (n % 15) == 0 then
-        { print "fizzbuzz "; () }
+        print "fizzbuzz "
     else if (n % 3) == 0 then
-        { print "fizz "; () }
+        print "fizz "
     else if (n % 5) == 0 then
-        { print "buzz "; () }
+        print "buzz "
     else ();
 
 for_n 30 fizzbuzz;

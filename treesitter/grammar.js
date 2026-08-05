@@ -46,17 +46,19 @@ export default grammar({
     // Statements
     // ------------------------------------------------------------
 
-    // Stmt: TypeDecl | BlockStmt | Expr
+    // Stmt: TypeDecl | BlockStmt  (BlockStmt carries the bare-Expr statements)
     _statement: $ => choice(
       $._type_declaration,
       $._block_statement,
-      $._expression,
     ),
 
-    // BlockStmt: `let` decls and `print` — no bare Expr, keeps blocks LR(1).
+    // BlockStmt: `let` decls and bare expression statements. Expression
+    // statements must live here (and not in a top-level `_statement`
+    // alternative) to mirror the LALR grammar, which keeps them only in
+    // `BlockStmt` so its lookahead sets stay LR(1)-clean.
     _block_statement: $ => choice(
       $.let_statement,
-      $.print_statement,
+      $._expression,
     ),
 
     let_statement: $ => choice(
@@ -74,11 +76,6 @@ export default grammar({
         '=',
         field('value', $._expression),
       ),
-    ),
-
-    print_statement: $ => seq(
-      'print',
-      field('value', $._atom),
     ),
 
     // ------------------------------------------------------------
@@ -326,7 +323,9 @@ export default grammar({
       $._atom,
     ),
 
-    // "{" BlkBody Expr "}"
+    // "{" BlkBody Expr "}" — statements are `;`-terminated, and the block's
+    // value is the final bare expression (a `;` before `}` is a parse error,
+    // matching the LALR grammar).
     block_expression: $ => seq(
       '{',
       repeat(seq($._block_statement, ';')),

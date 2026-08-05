@@ -2,7 +2,7 @@
 //! per-type specialization.
 
 use crate::ast::*;
-use crate::types::{Monotype, TypeFunc};
+use crate::types::{Monotype, TypeContext, TypeFunc};
 use melior::dialect::{arith, func, llvm, scf};
 use melior::ir::{
     Attribute,
@@ -352,10 +352,31 @@ pub(crate) fn lower_variable<'c, 'a>(
     }
 
     let function_type = module.symbols.get(name).ok_or_else(|| {
-        format!("codegen: undefined variable `{name}` (not a bound parameter or symbol)")
+        if TypeContext::is_builtin(name) {
+            format!("codegen: builtin `{name}` is not implemented yet")
+        } else {
+            format!("codegen: undefined variable `{name}` (not a bound parameter or symbol)")
+        }
     })?;
 
     let location = Location::unknown(module.context);
+
+    // A symbol that takes parameters is a builtin function value: reference it
+    // with a `func.constant` so ordinary application can `call_indirect` it.
+    // Nullary top-level bindings (`let x = ...` symbols) are called directly.
+    if function_type.input_count() > 0 {
+        return block
+            .append_operation(func::constant(
+                module.context,
+                FlatSymbolRefAttribute::new(module.context, name),
+                *function_type,
+                location,
+            ))
+            .result(0)
+            .map_err(|e| e.to_string())
+            .map(Into::into);
+    }
+
     let mut results = Vec::new();
     for i in 0..function_type.result_count() {
         results.push(function_type.result(i).map_err(|e| e.to_string())?);

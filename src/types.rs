@@ -104,6 +104,7 @@
  *  It follows from context that expression e is of polytype ∀α. σ (this means α can be anything)
  *
  */
+use std::sync::OnceLock;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
@@ -120,7 +121,7 @@ pub enum TypeFunc {
     Str,
     Fn, // ->
     List,
-    Enum(String) // TODO: might have to go
+    Enum(String)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,11 +130,13 @@ pub enum Monotype {
     TypeFuncApplication(Box<TypeFunc>, Vec<Monotype>),
 }
 
-impl Monotype {
-    pub fn default() -> Monotype {
+impl Default for Monotype {
+    fn default() -> Self {
         Self::TypeVariable(String::new())
     }
+}
 
+impl Monotype {
     pub fn apply(&self, sub : &Substitution) -> Monotype {
         match self.clone() {
             Self::TypeVariable(name) =>
@@ -268,6 +271,12 @@ pub struct Substitution {
     pub variables : HashMap<String, Monotype>
 }
 
+impl Default for Substitution {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Substitution {
     pub fn new() -> Substitution {
         Substitution { variables: HashMap::new() }
@@ -290,6 +299,26 @@ impl Substitution {
     }
 }
 
+pub(crate) fn builtins() -> &'static [(String, Polytype)] {
+    static BUILTINS: OnceLock<Vec<(String, Polytype)>> = OnceLock::new();
+    BUILTINS.get_or_init(|| {
+        let mono = |m: Monotype| Polytype::Mono(Box::new(m));
+        vec![
+            ("print".to_string(),       mono(Monotype::func(vec![Monotype::string(), Monotype::unit()]))),
+            ("println".to_string(),     mono(Monotype::func(vec![Monotype::string(), Monotype::unit()]))),
+            ("itostr".to_string(),      mono(Monotype::func(vec![Monotype::int(), Monotype::string()]))),
+            ("ftostr".to_string(),      mono(Monotype::func(vec![Monotype::float(), Monotype::string()]))),
+            ("btostr".to_string(),      mono(Monotype::func(vec![Monotype::bool(), Monotype::string()]))),
+            ("strtoi".to_string(),      mono(Monotype::func(vec![Monotype::string(), Monotype::int()]))),
+            ("strtof".to_string(),      mono(Monotype::func(vec![Monotype::string(), Monotype::float()]))),
+            ("strtob".to_string(),      mono(Monotype::func(vec![Monotype::string(), Monotype::bool()]))),
+            ("itof".to_string(),        mono(Monotype::func(vec![Monotype::int(), Monotype::float()]))),
+            ("ftoi".to_string(),        mono(Monotype::func(vec![Monotype::float(), Monotype::int()]))),
+            ("readin".to_string(),      mono(Monotype::func(vec![Monotype::unit(), Monotype::string()]))),
+        ]
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeAlias {
     pub params : Vec<String>,
@@ -304,9 +333,19 @@ pub struct TypeContext {
     enum_names : HashSet<String>
 }
 
+impl Default for TypeContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeContext {
     pub fn new() -> TypeContext {
-        TypeContext { type_var_ctr : 0, variables : HashMap::new(), type_aliases : HashMap::new(), enum_names : HashSet::new() }
+        let mut ctx = TypeContext { type_var_ctr : 0, variables : HashMap::new(), type_aliases : HashMap::new(), enum_names : HashSet::new() };
+        for (name, poly) in builtins() {
+            ctx.variables.insert(name.clone(), poly.clone());
+        }
+        ctx
     }
 
     pub fn make(map: HashMap<String, Polytype>) -> TypeContext {
@@ -353,6 +392,10 @@ impl TypeContext {
 
     pub fn free_variables(&self) -> Vec<String> {
         self.variables.values().flat_map(|t| t.free_variables()).collect()
+    }
+
+    pub fn is_builtin(name: &str) -> bool {
+        builtins().iter().any(|(n, _)| n == name)
     }
 
     // Generalise free variables (that aren't free in the context) by renaming
@@ -545,7 +588,7 @@ fn check_exhaustive(match_t : &Monotype, cases : &[MatchCase]) -> Result<(), Uni
             if has_true && has_false {
                 Ok(())
             } else {
-                Err(UnificationError { message: format!("Match on `bool` is not exhaustive: cover both `true` and `false`") })
+                Err(UnificationError { message: "Match on `bool` is not exhaustive: cover both `true` and `false`".to_string() })
             }
         },
         Monotype::TypeFuncApplication(f, _) if **f == TypeFunc::List => {
@@ -554,7 +597,7 @@ fn check_exhaustive(match_t : &Monotype, cases : &[MatchCase]) -> Result<(), Uni
             if covers_empty && covers_nonempty {
                 Ok(())
             } else {
-                Err(UnificationError { message: format!("Match on a list is not exhaustive: cover both `[]` and a `x::xs` pattern") })
+                Err(UnificationError { message: "Match on a list is not exhaustive: cover both `[]` and a `x::xs` pattern".to_string() })
             }
         },
         _ => Err(UnificationError { message: format!("Match on {:?} is not exhaustive: add a catch-all variable pattern", match_t) }),
@@ -604,6 +647,9 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
             Ok((s1.combine(s2).combine(s3.clone()), ret_var.apply(&s3)))
         },
         ENode::Let(name, exp1, exp2) => {
+            if TypeContext::is_builtin(name) {
+                return Err(UnificationError { message: format!("Redefinition of builtin function '{}' not allowed", name) });
+            }
             let rec_var = Monotype::var(context.new_typevar());
             let old_binding = context.get(name);
             context.add(name.clone(), Polytype::Mono(Box::new(rec_var.clone())));
@@ -643,6 +689,9 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
                             ENode::Variable(name) => name.clone(),
                             _ => return Err(UnificationError { message: "Expected a variable name in declaration".to_string() }),
                         };
+                        if TypeContext::is_builtin(&var_name) {
+                            return Err(UnificationError { message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
+                        }
                         let binding_type = type_to_typefn(t1, context)?;
                         let old_binding = context.get(&var_name);
                         context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
@@ -664,14 +713,6 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
                         let (s1, _) = algo_w(context, e1)?;
                         *context = context.apply(&s1);
                         combined = combined.combine(s1);
-                    },
-                    SNode::Print(e1) => {
-                        let (s1, t1) = algo_w(context, e1)?;
-                        *context = context.apply(&s1);
-                        combined = combined.combine(s1);
-                        let s2 = unify(&t1, &Monotype::string())?;
-                        *context = context.apply(&s2);
-                        combined = combined.combine(s2);
                     },
                     SNode::TypeDecl(_, _) => return Err(UnificationError {
                         message: "Type declarations are not allowed inside block expressions".to_string()

@@ -16,7 +16,6 @@ use super::apply::{
     bind_in_env, default_free_vars, lower_abstraction, lower_application, lower_let, lower_literal,
     lower_variable,
 };
-use super::stmt::lower_print_stmt;
 use super::enums::{
     PatternBind, destructure_pattern, enum_disc_eq, enum_variant_fields,
 };
@@ -382,7 +381,6 @@ fn lower_block_stmt<'c, 'a>(
             lower_expr(e1, block, module, env)?;
             Ok(())
         }
-        SNode::Print(e1) => lower_print_stmt(e1, module, block, env),
         SNode::TypeDecl(_, _) => Err(
             "codegen: type declarations are not allowed inside block expressions".to_string(),
         ),

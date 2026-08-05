@@ -60,7 +60,6 @@ pub(crate) fn free_variables(expr: &Expr) -> HashSet<String> {
                         }
                     }
                     SNode::Expr(e1) => union_into(&mut fv, free_variables(e1)),
-                    SNode::Print(e1) => union_into(&mut fv, free_variables(e1)),
                     SNode::TypeDecl(..) => {}
                 }
             }

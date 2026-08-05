@@ -8,5 +8,8 @@ let get_res = \opt => match opt
     ;
 
 match get_res (get_none 1)
-| Err msg => { print msg; () }
-| _ => { print "failed"; () };
+| Err msg => print msg
+| _ => print "failed";
+
+let helloworld = ["hello", ", ", "world"];
+iter print helloworld;

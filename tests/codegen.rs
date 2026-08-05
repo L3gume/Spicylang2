@@ -227,3 +227,41 @@ fn prelude_boolean_logic() {
     assert_eq!(expect_bool_prelude("even 4;"), true);
     assert_eq!(expect_bool_prelude("odd 4;"), false);
 }
+
+// ----------------------------------------------------------------------------
+// Builtin functions
+// ----------------------------------------------------------------------------
+
+#[test]
+fn print_builtin_runs() {
+    // `print "hi";` is an application of the seeded `print : str -> unit`
+    // builtin; it must lower through the ordinary application path and run.
+    match run(r#"print "hello";"#, false) {
+        Ok(codegen::ExecutionResult::Unit) => {}
+        other => panic!("expected Unit, got {other:?}"),
+    }
+}
+
+#[test]
+fn print_is_first_class() {
+    // `map print xs` passes the builtin as a function value.
+    match run(r#"map print ["a", "b", "c"];"#, true) {
+        Ok(codegen::ExecutionResult::List(_)) => {}
+        other => panic!("expected List, got {other:?}"),
+    }
+}
+
+#[test]
+fn print_requires_string_argument() {
+    // `print : str -> unit`; applying it to an `int` is a type error.
+    assert!(run("print 42;", false).is_err());
+}
+
+#[test]
+fn unimplemented_builtin_fails_at_codegen() {
+    // Seeded in the type context (so it typechecks) but no runtime function is
+    // emitted yet: the error should name the builtin.
+    let err = run("itostr 42;", false).unwrap_err();
+    assert!(err.contains("itostr"), "unexpected error: {err}");
+    assert!(err.contains("not implemented"), "unexpected error: {err}");
+}

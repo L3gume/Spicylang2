@@ -12,6 +12,7 @@
     - [ ] Actually compile and execute
     - [x] Make repl jit-compiled
 - [ ] Better parser + lexer
+    - [x] allow exprstmt in block
     - [ ] Location info in AST
     - [ ] Better error messages in parse and typecheck
     - [x] Support comments
@@ -20,7 +21,7 @@
 - [x] User-defined enumeration types
 - [ ] User-defined structure types
 - [x] Pattern Matching on expressions
-- [ ] Builtin type to string conversions for print
+- [x] Builtin type to string conversions for print
     - support escape characters like '\n'
     - OCaml does str_of_xx for this, just applying 'str' to value is fine, type checker will simply return str type
     - Code gen will handle generating conversion code

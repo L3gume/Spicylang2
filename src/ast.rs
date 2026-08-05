@@ -53,7 +53,6 @@ pub struct TypeHeader {
 pub enum SNode {
     Decl(Box<Expr>, Box<Type>, Box<Expr>),  // let x [: Type] = e;
     Expr(Box<Expr>),                        // e; special case, not always ()
-    Print(Box<Expr>),                       // print e;
     TypeDecl(TypeHeader, Box<TypeDec>) // name <type vars> = <type>
 }
 
@@ -82,6 +81,9 @@ impl Stmt {
                     ENode::Variable(name) => name.clone(),
                     _ => return Err(UnificationError { message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
                 };
+                if TypeContext::is_builtin(&var_name) {
+                    return Err(UnificationError { message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
+                }
                 let binding_type = type_to_typefn(t1, &mut context)?;
                 let old_binding = context.get(&var_name);
                 context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
@@ -103,14 +105,6 @@ impl Stmt {
                 let (sub, typ) = algo_w(&mut context, e1)?;
                 self.ctx = context.apply(&sub);
                 (sub, typ)
-            },
-            SNode::Print(e1) => {
-                let (s1, t1) = algo_w(&mut context, e1)?;
-                let s2 = unify(&t1, &Monotype::string())?;
-                let combined = s1.combine(s2);
-                context = context.apply(&combined);
-                self.ctx = context;
-                (combined, Monotype::unit())
             },
             SNode::TypeDecl(header, dec) => {
                 handle_type_decl(header, dec, &mut context)?;
@@ -154,7 +148,6 @@ pub fn resolve_stmt_types(stmt : &mut Stmt, sub : &Substitution) {
             resolve_expr_types(e2, sub);
         },
         SNode::Expr(e1) => resolve_expr_types(e1, sub),
-        SNode::Print(e1) => resolve_expr_types(e1, sub),
         SNode::TypeDecl(_, _) => {}
     }
 }

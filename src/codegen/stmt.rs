@@ -12,7 +12,7 @@ use melior::ir::{
 };
 use std::collections::HashMap;
 
-use super::{AbstractionInfo, EnumLayout, Env, Module};
+use super::{AbstractionInfo, EnumLayout, Module};
 use super::apply::default_free_vars;
 use super::expr::lower_expr;
 use super::types::lower_type;
@@ -26,6 +26,7 @@ use super::types::lower_type;
 /// node with no dialect mapping yet).
 pub fn lower<'a>(prog: &Program, context: &'a melior::Context) -> Result<Module<'a>, String> {
     let mut module = Module::new(context);
+    register_runtime_builtins(&mut module)?;
 
     let entry_block = Block::new(&[]);
     let mut last_value: Option<Value<'a, '_>> = None;
@@ -86,11 +87,6 @@ fn lower_stmt<'a, 'b>(
             Ok(None)
         }
         SNode::Expr(e1) => lower_expr_stmt(e1, module, entry).map(Some),
-        SNode::Print(e1) => {
-            let mut env = HashMap::new();
-            lower_print_stmt(e1, module, entry, &mut env)?;
-            Ok(None)
-        }
     }
 }
 
@@ -107,39 +103,69 @@ fn lower_expr_stmt<'a, 'b>(
     lower_expr(expr, entry, module, &mut env)
 }
 
-/// Lower a `print e;` statement to an `llvm.call @printf` on `e`.
+/// Emit the runtime builtin functions and register their signatures in
+/// [`Module::symbols`], so `print "hi"` — and even `map print xs` — lower
+/// through the ordinary application path (`lower_variable` -> `call_indirect`)
+/// instead of special dispatch.
 ///
-/// The type checker guarantees `e : str`, so the lowered value is a
-/// `!llvm.ptr`, which is exactly what `printf` expects.
-pub(crate) fn lower_print_stmt<'a, 'b>(
-    expr: &Expr,
-    module: &mut Module<'a>,
-    entry: &'b Block<'a>,
-    env: &mut Env<'a, 'b>,
-) -> Result<(), String> {
-    let value = lower_expr(expr, entry, module, env)?;
+/// Each builtin is a real `func.func` with a body. Only `print` is implemented
+/// here so far; the remaining builtins are seeded in the type context (see
+/// [`crate::types::builtins`]) and fail at codegen with a clear error until
+/// they get a body here.
+pub(crate) fn register_runtime_builtins<'a>(module: &mut Module<'a>) -> Result<(), String> {
     ensure_printf(module)?;
 
     let location = Location::unknown(module.context);
+    let ptr = Type::parse(module.context, "!llvm.ptr")
+        .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
+    let i32_type: Type = IntegerType::new(module.context, 32).into();
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
+
+    // @print(!llvm.ptr) -> i32
+    //   %0 = llvm.ptrtoint %arg0 : !llvm.ptr to i64
+    //   %1 = func.call @printf(%0) : (i64) -> i32
+    //   return %1 : i32
+    let block = Block::new(&[(ptr, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
     let ptrtoint = OperationBuilder::new("llvm.ptrtoint", location)
-        .add_operands(&[value])
-        .add_results(&[IntegerType::new(module.context, 64).into()])
+        .add_operands(&[arg])
+        .add_results(&[i64_type])
         .build()
         .map_err(|e| e.to_string())?;
-    let arg_i64: Value = entry
+    let arg_i64: Value<'_, '_> = block
         .append_operation(ptrtoint)
         .result(0)
         .map_err(|e| e.to_string())?
         .into();
-
     let call = func::call(
         module.context,
         FlatSymbolRefAttribute::new(module.context, "printf"),
         &[arg_i64],
-        &[IntegerType::new(module.context, 32).into()],
+        &[i32_type],
         location,
     );
-    entry.append_operation(call);
+    let result: Value<'_, '_> = block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &[ptr], &[i32_type]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "print"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("print".to_string(), function_type);
+    module.functions += 1;
     Ok(())
 }
 

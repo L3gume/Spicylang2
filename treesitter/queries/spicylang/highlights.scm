@@ -9,7 +9,6 @@
   "then"
   "else"
   "match"
-  "print"
   "type"
   "enum"
   "list"
@@ -73,6 +72,9 @@
 (variable) @variable
 
 ; Function calls
+(application_expression
+  function: (variable) @function)
+
 (application_expression
   function: (application_expression
     (variable) @function))

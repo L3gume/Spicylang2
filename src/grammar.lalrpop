@@ -87,14 +87,19 @@ Variant: Variant = {
 pub Stmt: Stmt = {
     TypeDecl    => <>,
     BlockStmt   => <>,
-    <e:Expr>    => Stmt::from(SNode::Expr(e)),
 };
 
-// Statements allowed inside a block — no bare Expr variant to keep LR(1).
+// Statements allowed inside a block. Includes a bare `Expr` so expression
+// statements work (e.g. `{ print "x"; 42 }`); the block's trailing value is
+// the final `Expr` in `{ BlkBody Expr }`, so a `;` before `}` is a parse
+// error. The bare `Expr` alternative must NOT also appear in the top-level
+// `Stmt` rule: two expression-statement contexts merged by LALR pollute the
+// expression-completion states' lookahead sets and produce reduce/shift
+// conflicts on every binary operator.
 BlockStmt: Stmt = {
     "let" <n:Name> ":" <t:Type> "=" <e:Expr>    => Stmt::from(SNode::Decl(Box::new(Expr::from(ENode::Variable(n))), t, e)),
     "let" <n:Name> "=" <e:Expr>                 => Stmt::from(SNode::Decl(Box::new(Expr::from(ENode::Variable(n))), Box::new(Type { t : Monotype::infer() }), e)),
-    "print" <e:Atom>                            => Stmt::from(SNode::Print(e)),
+    <e:Expr>    => Stmt::from(SNode::Expr(e)),
 };
 
 // Zero or more BlockStmt;s for the statement prefix of a block expression.
