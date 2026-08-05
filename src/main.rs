@@ -1,20 +1,11 @@
 use std::process;
-use lalrpop_util::lalrpop_mod;
-use ast::Program;
-
-mod ast;
-mod codegen;
-mod display;
-mod prelude;
-mod repl;
-mod types;
-
-lalrpop_mod!(pub grammar);
+use spicylang2::ast::Program;
 
 fn main() {
     let mut dump_ast = false;
     let mut dump_mlir = false;
     let mut start_repl = false;
+    let mut include_prelude = false;
     let mut file: Option<String> = None;
 
     for arg in std::env::args().skip(1) {
@@ -22,6 +13,7 @@ fn main() {
             "--ast" => dump_ast = true,
             "--mlir" => dump_mlir = true,
             "--repl" => start_repl = true,
+            "--prelude" => include_prelude = true,
             "--help" | "-h" => {
                 println!("usage: spicylang [--ast] [--repl] <file.spcy>");
                 println!("  --ast    dump the program's AST after it completes");
@@ -38,7 +30,7 @@ fn main() {
     }
 
     match file {
-        None => repl::repl_loop(None),
+        None => spicylang2::repl::repl_loop(None),
         Some(path) => {
             let source = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
@@ -48,7 +40,8 @@ fn main() {
                 }
             };
 
-            let mut prog = match Program::parse_with_prelude(&source) {
+            let mut prog = match
+                if start_repl && !include_prelude {Program::parse(&source)} else {Program::parse_with_prelude(&source)} {
                 Ok(p) => {
                     println!("parse: ok");
                     p
@@ -65,8 +58,8 @@ fn main() {
             }
             println!("typecheck: ok");
 
-            let context = codegen::new_context();
-            match codegen::lower(&prog, &context) {
+            let context = spicylang2::codegen::new_context();
+            match spicylang2::codegen::lower(&prog, &context) {
                 Ok(mut module) => {
                     println!(
                         "codegen: ok ({} top-level functions)",
@@ -91,7 +84,7 @@ fn main() {
             }
 
             if start_repl {
-                repl::repl_loop(Some(prog));
+                spicylang2::repl::repl_loop(Some(prog));
             }
         }
     }
@@ -99,11 +92,11 @@ fn main() {
 
 /// Emit a native object file and link it into an executable named after the
 /// source file (with the `.spcy` extension stripped).
-fn compile_executable(source_path: &str, module: &mut codegen::Module) {
+fn compile_executable(source_path: &str, module: &mut spicylang2::codegen::Module) {
     let output_path = std::path::Path::new(source_path).with_extension("");
     let obj_path = std::env::temp_dir().join(format!("spicylang_{}.o", process::id()));
 
-    if let Err(e) = codegen::compile(module, obj_path.to_str().unwrap()) {
+    if let Err(e) = spicylang2::codegen::compile(module, obj_path.to_str().unwrap()) {
         eprintln!("codegen: error: {}", e);
         process::exit(3);
     }

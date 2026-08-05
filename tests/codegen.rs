@@ -1,0 +1,229 @@
+//! End-to-end code generation tests: parse -> typecheck -> lower -> JIT.
+//!
+//! These exercise the MLIR codegen backend (including the LLVM JIT), so they
+//! cover the closure/application machinery that the AST and type-checker unit
+//! tests cannot reach.
+
+use spicylang2::ast;
+use spicylang2::codegen;
+
+/// Parse (optionally with the prelude prepended), typecheck, lower, and JIT
+/// run `source`, returning the value of the trailing expression statement.
+fn run(source: &str, prelude: bool) -> Result<codegen::ExecutionResult, String> {
+    let mut prog = if prelude {
+        ast::Program::parse_with_prelude(source)?
+    } else {
+        ast::Program::parse(source)?
+    };
+    ast::Program::typecheck(&mut prog).map_err(|e| e.to_string())?;
+    let context = codegen::new_context();
+    let mut module = codegen::lower(&prog, &context)?;
+    codegen::execute(&mut module, None)
+}
+
+fn expect_int(source: &str) -> i32 {
+    match run(source, false) {
+        Ok(codegen::ExecutionResult::Int(n)) => n,
+        other => panic!("expected Int, got {other:?}"),
+    }
+}
+
+fn expect_int_prelude(source: &str) -> i32 {
+    match run(source, true) {
+        Ok(codegen::ExecutionResult::Int(n)) => n,
+        other => panic!("expected Int, got {other:?}"),
+    }
+}
+
+fn expect_list(source: &str) -> Vec<codegen::ExecutionResult> {
+    match run(source, true) {
+        Ok(codegen::ExecutionResult::List(items)) => items,
+        other => panic!("expected List, got {other:?}"),
+    }
+}
+
+fn expect_bool_prelude(source: &str) -> bool {
+    match run(source, true) {
+        Ok(codegen::ExecutionResult::Bool(b)) => b,
+        other => panic!("expected Bool, got {other:?}"),
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Basic expressions
+// ----------------------------------------------------------------------------
+
+#[test]
+fn int_arithmetic() {
+    assert_eq!(expect_int("1 + 2 * 3;"), 7);
+}
+
+#[test]
+fn nested_arithmetic() {
+    assert_eq!(expect_int("(1 + 2) * (3 + 4);"), 21);
+}
+
+#[test]
+fn if_else() {
+    assert_eq!(expect_int("if true then 1 else 2;"), 1);
+    assert_eq!(expect_int("if false then 1 else 2;"), 2);
+}
+
+#[test]
+fn recursion() {
+    assert_eq!(
+        expect_int(
+            "let fib = \\(n : int) => match n | 0 => 1 | 1 => 1 | x => fib (x - 1) + fib (x - 2);
+             fib 10;"
+        ),
+        89
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Inline lambdas
+// ----------------------------------------------------------------------------
+
+#[test]
+fn inline_lambda_full_application() {
+    assert_eq!(expect_int("(\\x y => x + y) 3 4;"), 7);
+}
+
+#[test]
+fn inline_curried_lambda_three_params() {
+    assert_eq!(expect_int("(\\x y z => x * y + z) 2 3 4;"), 10);
+}
+
+#[test]
+fn inline_lambda_in_application_argument() {
+    // Passing a curried inline lambda as an argument used to produce a
+    // single-parameter closure and fail verification.
+    assert_eq!(expect_int_prelude("lfold (\\x y => x + y) 0 [1,2,3,4,5];"), 15);
+}
+
+#[test]
+fn inline_cons_lambda_as_argument() {
+    assert_eq!(
+        expect_list("lfold (\\acc x => x::acc) [] [1,2,3];"),
+        vec![
+            codegen::ExecutionResult::Int(3),
+            codegen::ExecutionResult::Int(2),
+            codegen::ExecutionResult::Int(1),
+        ]
+    );
+}
+
+#[test]
+fn map_with_inline_lambda() {
+    assert_eq!(
+        expect_list("map (\\x => x * 2) [1,2,3];"),
+        vec![
+            codegen::ExecutionResult::Int(2),
+            codegen::ExecutionResult::Int(4),
+            codegen::ExecutionResult::Int(6),
+        ]
+    );
+}
+
+#[test]
+fn filter_with_inline_lambda() {
+    assert_eq!(
+        expect_list("filter (\\x => x > 2) [1,2,3,4];"),
+        vec![
+            codegen::ExecutionResult::Int(3),
+            codegen::ExecutionResult::Int(4),
+        ]
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Partial application
+// ----------------------------------------------------------------------------
+
+#[test]
+fn partial_application_of_named_lambda() {
+    assert_eq!(
+        expect_int("let add = \\x y => x + y; let inc = add 1; inc 41;"),
+        42
+    );
+}
+
+#[test]
+fn partial_application_in_expression() {
+    // `add 1` is partially applied and passed directly as an argument.
+    assert_eq!(
+        expect_list("let add = \\x y => x + y; map (add 1) [10,20,30];"),
+        vec![
+            codegen::ExecutionResult::Int(11),
+            codegen::ExecutionResult::Int(21),
+            codegen::ExecutionResult::Int(31),
+        ]
+    );
+}
+
+#[test]
+fn partial_application_two_steps() {
+    assert_eq!(
+        expect_int(
+            "let add3 = \\x y z => x + y + z;
+             let add_two = add3 1;
+             let inc = add_two 2;
+             inc 39;"
+        ),
+        42
+    );
+}
+
+#[test]
+fn partial_application_then_apply() {
+    assert_eq!(
+        expect_int("let lfold = \\fn acc ls => match ls | [] => acc | x::xs => lfold fn (fn acc x) xs; lfold (\\x y => x + y) 0 [1,2,3];"),
+        6
+    );
+}
+
+#[test]
+fn partial_application_via_inlineable_let() {
+    assert_eq!(
+        expect_int_prelude("let sum = lfold (\\x y => x + y) 0; sum [1,2,3,4];"),
+        10
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Prelude functions
+// ----------------------------------------------------------------------------
+
+#[test]
+fn prelude_map() {
+    assert_eq!(
+        expect_list("map (\\x => x * 3) [1,2];"),
+        vec![
+            codegen::ExecutionResult::Int(3),
+            codegen::ExecutionResult::Int(6),
+        ]
+    );
+}
+
+#[test]
+fn prelude_lfold_sum() {
+    assert_eq!(expect_int_prelude("lfold (\\a b => a + b) 0 [1,2,3,4,5,6];"), 21);
+}
+
+#[test]
+fn prelude_filter_odd() {
+    assert_eq!(
+        expect_list("filter odd [1,2,3,4,5];"),
+        vec![
+            codegen::ExecutionResult::Int(1),
+            codegen::ExecutionResult::Int(3),
+            codegen::ExecutionResult::Int(5),
+        ]
+    );
+}
+
+#[test]
+fn prelude_boolean_logic() {
+    assert_eq!(expect_bool_prelude("even 4;"), true);
+    assert_eq!(expect_bool_prelude("odd 4;"), false);
+}

@@ -5,6 +5,7 @@ use super::Module;
 use super::apply::default_free_vars;
 use melior::{ExecutionEngine, pass};
 
+#[derive(PartialEq)]
 pub enum ExecutionResult {
     Int(i32),
     Float(f32),

@@ -1,7 +1,58 @@
+# Spicylang prelude
+
+#
+# UTILITY TYPES & FUNCTIONS
+#
+
+enum Option('a) =
+    Some('a)
+    | None;
+
+enum Result('a, 'err)=
+    Ok('a)
+    | Err('err);
+
+let opt = \x => Some x;
+
+let get_or_else = \opt default => match opt
+    | Some x => x
+    | None => default;
+
 let odd = \(i : int) => match i % 2
     | 0 => false
     | _ => true;
 let even = \(i : int) => !(odd i);
+
+#
+# LISTS AND ITERATION
+#
+
+let head = \ls => match ls
+    | [] => None
+    | x::xs => Some x;
+
+let tail = \ls => match ls
+    | [] => None
+    | x::xs => Some xs;
+
+let last = \ls =>
+    let aux = (\ls elem => match ls
+        | [] => elem
+        | x::xs => aux xs x)
+    in match ls
+    | [] => None
+    | x::xs => Some (aux xs x);
+
+let get_i = \idx ls => match ls
+    | [] => None
+    | x::xs => (if idx == 0 then Some x else get_i (idx - 1) xs);
+
+let len = \ls =>
+    let aux = (\ls ctr => match ls
+        | [] => ctr
+        | x::xs => aux xs (ctr + 1))
+    in
+    aux ls 0;
 
 # iterate fn: 'a -> unit over all elements
 let iter = \fn ls => match ls

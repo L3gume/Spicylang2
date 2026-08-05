@@ -14,7 +14,7 @@ use melior::ir::{
     r#type::{FunctionType, IntegerType},
     Block, BlockLike, Identifier, Location, Region, RegionLike, Type, Value, ValueLike,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{AbstractionInfo, Env, EnvEntry, Module};
 use super::closures::{build_closure, closure_call, env_struct_type, free_variables, load_field};
@@ -527,9 +527,17 @@ pub(crate) fn lower_application<'c, 'a>(
                         env,
                     );
                 }
-                return Err(format!(
-                    "codegen: partial application of `{name}` is not supported yet"
-                ));
+                return lower_partial_application(
+                    &sym,
+                    name,
+                    &info,
+                    &root.typ,
+                    &params,
+                    &args,
+                    block,
+                    module,
+                    env,
+                );
             }
         }
     }
@@ -619,6 +627,110 @@ fn lower_full_application<'c, 'a>(
         .map(Into::into)
 }
 
+/// Lower a partial application of the lambda `sym`: it has more parameters
+/// than the arguments supplied, so the result is itself a function value.
+///
+/// Emits a wrapper `func.func @sym_partial_N(remaining...) -> ret` whose body
+/// calls the fully specialized `@sym_spec_...` with the already-supplied
+/// arguments followed by the remaining parameters, and references it with a
+/// `func.constant` of the flat function type `(remaining...) -> ret`.
+fn lower_partial_application<'c, 'a>(
+    sym: &str,
+    self_name: &str,
+    info: &AbstractionInfo,
+    root_typ: &Monotype,
+    params: &[String],
+    args: &[Expr],
+    block: &'a Block<'c>,
+    module: &mut Module<'c>,
+    env: &Env<'c, 'a>,
+) -> Result<Value<'c, 'a>, String> {
+    let location = Location::unknown(module.context);
+    let captures = lambda_captures(info, self_name, env);
+    if !captures.is_empty() {
+        return Err(format!(
+            "codegen: partial application of `{self_name}` (a closure with captures) is not supported yet"
+        ));
+    }
+    let full_symbol = specialize_binding(sym, self_name, root_typ, &captures, module)?;
+    let (param_monos, ret_mono) = concrete_func_parts(root_typ, params.len())?;
+    let ret_mlir = lower_type(&ret_mono, module)?;
+
+    let remaining_types: Vec<Type<'c>> = param_monos[args.len()..]
+        .iter()
+        .map(|m| lower_type(m, module))
+        .collect::<Result<_, _>>()?;
+
+    let symbol = format!("{sym}_partial_{}", module.spec_counter);
+    module.spec_counter += 1;
+
+    let partial_block =
+        Block::new(&remaining_types.iter().map(|t| (*t, location)).collect::<Vec<_>>());
+    let mut partial_env = HashMap::new();
+    for (j, p) in params[args.len()..].iter().enumerate() {
+        let arg: Value<'c, 'a> = partial_block
+            .argument(j)
+            .map_err(|e| e.to_string())?
+            .into();
+        partial_env.insert(p.clone(), EnvEntry::Value(arg));
+    }
+
+    // The already-supplied arguments are lowered inside the wrapper (they may
+    // reference top-level symbols); the remaining parameters come from the
+    // wrapper's own block arguments.
+    let mut call_args: Vec<Value<'c, '_>> = Vec::new();
+    for a in args {
+        call_args.push(lower_expr(a, &partial_block, module, &mut partial_env)?);
+    }
+    for j in 0..remaining_types.len() {
+        let arg: Value<'c, '_> = partial_block
+            .argument(j)
+            .map_err(|e| e.to_string())?
+            .into();
+        call_args.push(arg);
+    }
+
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, &full_symbol),
+        &call_args,
+        &[ret_mlir],
+        location,
+    );
+    let result: Value<'c, '_> = partial_block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    partial_block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &remaining_types, &[ret_mlir]);
+    let region = Region::new();
+    region.append_block(partial_block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, &symbol),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.functions += 1;
+
+    block
+        .append_operation(func::constant(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, &symbol),
+            function_type,
+            location,
+        ))
+        .result(0)
+        .map_err(|e| e.to_string())
+        .map(Into::into)
+}
+
 /// Split a single-argument function type `A => B` into `(A, B)`.
 fn function_parts(typ: &Monotype) -> Option<(Monotype, Monotype)> {
     match typ {
@@ -693,12 +805,15 @@ pub(crate) fn is_scalar_type(typ: &Monotype) -> bool {
     !matches!(typ, Monotype::TypeFuncApplication(f, _) if matches!(**f, TypeFunc::Fn))
 }
 
-/// Lower a bare abstraction `\x : T => e` to a closure.
+/// Lower a bare abstraction `\x1 x2 ... => e` to a closure.
 ///
-/// The abstraction compiles to `func.func @closure_N(x, env) -> ret` where
-/// `env` holds the free variables of the body that are in scope here (the
-/// captures); the closure value allocated in the current block stores the
-/// function address plus those captures.
+/// Curried lambdas are un-curried into a single function taking all of their
+/// parameters at once, matching the flat `FunctionType` that function types
+/// lower to (see [`super::types::lower_type`]). The abstraction compiles to
+/// `func.func @closure_N(x1, ..., xn [, env]) -> ret`; the closure value
+/// emitted in the current block is a `func.constant` on that function when
+/// there are no captures, otherwise a heap closure struct `{ fn_ptr, env }`
+/// holding the captures.
 pub(crate) fn lower_abstraction<'c, 'a>(
     expr: &Expr,
     binding: &Binding,
@@ -707,30 +822,34 @@ pub(crate) fn lower_abstraction<'c, 'a>(
     module: &mut Module<'c>,
     env: &Env<'c, 'a>,
 ) -> Result<Value<'c, 'a>, String> {
-    let Binding(name, param_type) = binding;
-    let param_mono = match &param_type.t {
-        Monotype::TypeFuncApplication(f, _) if matches!(**f, TypeFunc::Infer) => {
-            concrete_parts(&expr.typ)
-                .map(|(param, _)| param)
-                .ok_or_else(|| {
-                    format!(
-                        "codegen: abstraction parameter type not resolved for `{}`",
-                        name
-                    )
-                })?
-        }
-        _ => param_type.t.clone(),
-    };
-    let param_mlir = lower_type(&param_mono, module)?;
+    // Un-curry: `\x => \y => ... => body` becomes `(x, y, ...)` and the
+    // innermost body.
+    let mut params = vec![binding.clone()];
+    let mut inner = body;
+    while let ENode::Abstraction(b, bd) = &*inner.e {
+        params.push((**b).clone());
+        inner = bd;
+    }
+
+    // The concrete parameter types come from the lambda's (flattened)
+    // resolved type, so every parameter's MLIR type matches the function
+    // type expected at the lambda's use sites.
+    let (param_monos, _) = concrete_func_parts(&expr.typ, params.len())?;
+    let param_mlirs: Vec<Type> = param_monos
+        .iter()
+        .map(|m| lower_type(m, module))
+        .collect::<Result<_, _>>()?;
     let env_i64 = IntegerType::new(module.context, 64).into();
 
-    // Captures: free variables of the body that are bound in the enclosing
-    // environment. Their values are available here (at closure creation) and
-    // are loaded from the `env` pointer inside the compiled function.
-    let free = free_variables(body);
+    // Captures: free variables of the innermost body (beyond all parameters)
+    // that are bound in the enclosing environment. Their values are available
+    // here (at closure creation) and are loaded from the `env` pointer inside
+    // the compiled function.
+    let free = free_variables(inner);
+    let param_names: HashSet<String> = params.iter().map(|b| b.0.clone()).collect();
     let mut captures: Vec<(String, Value<'c, 'a>, Type<'c>)> = Vec::new();
     for (name, entry) in env.iter() {
-        if free.contains(name) {
+        if free.contains(name) && !param_names.contains(name) {
             match entry {
                 EnvEntry::Value(value) => captures.push((name.clone(), *value, value.r#type())),
                 EnvEntry::Abstraction(sym) => {
@@ -759,16 +878,22 @@ pub(crate) fn lower_abstraction<'c, 'a>(
     let location = Location::unknown(module.context);
 
     if captures.is_empty() {
-        let closure_block = Block::new(&[(param_mlir, location)]);
-        let arg: Value<'c, 'a> = closure_block.argument(0).map_err(|e| e.to_string())?.into();
+        let closure_block = Block::new(
+            &param_mlirs.iter().map(|t| (*t, location)).collect::<Vec<_>>(),
+        );
         let mut closure_env = HashMap::new();
-        closure_env.insert(name.clone(), EnvEntry::Value(arg));
+        for (i, Binding(param, _)) in params.iter().enumerate() {
+            let arg: Value<'c, 'a> = closure_block
+                .argument(i)
+                .map_err(|e| e.to_string())?
+                .into();
+            closure_env.insert(param.clone(), EnvEntry::Value(arg));
+        }
 
-        let body_value = lower_expr(body, &closure_block, module, &mut closure_env)?;
+        let body_value = lower_expr(inner, &closure_block, module, &mut closure_env)?;
         closure_block.append_operation(func::r#return(&[body_value], location));
 
-        let function_type =
-            FunctionType::new(module.context, &[param_mlir], &[body_value.r#type()]);
+        let function_type = FunctionType::new(module.context, &param_mlirs, &[body_value.r#type()]);
         let region = Region::new();
         region.append_block(closure_block);
 
@@ -794,14 +919,23 @@ pub(crate) fn lower_abstraction<'c, 'a>(
             .map_err(|e| e.to_string())
             .map(Into::into)
     } else {
-        let closure_block = Block::new(&[(param_mlir, location), (env_i64, location)]);
-        let arg = closure_block.argument(0).map_err(|e| e.to_string())?.into();
+        let mut all_inputs: Vec<Type> = param_mlirs.clone();
+        all_inputs.push(env_i64);
+        let closure_block = Block::new(
+            &all_inputs.iter().map(|t| (*t, location)).collect::<Vec<_>>(),
+        );
+        let mut closure_env = HashMap::new();
+        for (i, Binding(param, _)) in params.iter().enumerate() {
+            let arg: Value<'c, 'a> = closure_block
+                .argument(i)
+                .map_err(|e| e.to_string())?
+                .into();
+            closure_env.insert(param.clone(), EnvEntry::Value(arg));
+        }
         let env_arg_i64: Value<'c, 'a> = closure_block
-            .argument(1)
+            .argument(params.len())
             .map_err(|e| e.to_string())?
             .into();
-        let mut closure_env = HashMap::new();
-        closure_env.insert(name.clone(), EnvEntry::Value(arg));
 
         let env_ptr = Type::parse(module.context, "!llvm.ptr")
             .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
@@ -829,11 +963,11 @@ pub(crate) fn lower_abstraction<'c, 'a>(
             closure_env.insert(capture.clone(), EnvEntry::Value(value));
         }
 
-        let body_value = lower_expr(body, &closure_block, module, &mut closure_env)?;
+        let body_value = lower_expr(inner, &closure_block, module, &mut closure_env)?;
         closure_block.append_operation(func::r#return(&[body_value], location));
 
         let function_type =
-            FunctionType::new(module.context, &[param_mlir, env_i64], &[body_value.r#type()]);
+            FunctionType::new(module.context, &all_inputs, &[body_value.r#type()]);
         let region = Region::new();
         region.append_block(closure_block);
 

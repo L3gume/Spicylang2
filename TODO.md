@@ -14,8 +14,9 @@
 - [ ] Better parser + lexer
     - [ ] Location info in AST
     - [ ] Better error messages in parse and typecheck
-    - [ ] Support comments
+    - [x] Support comments
 - [ ] Pretty-printing of type and AST nodes
+    - [ ] abstract type variables in types => 'a, 'b, etc. instead of txx
 - [x] User-defined enumeration types
 - [ ] User-defined structure types
 - [x] Pattern Matching on expressions
@@ -23,11 +24,12 @@
     - support escape characters like '\n'
     - OCaml does str_of_xx for this, just applying 'str' to value is fine, type checker will simply return str type
     - Code gen will handle generating conversion code
-- [ ] Builtin List stuff
+- [x] Builtin List stuff
     - [x] builtin cons and list expressions
-    - [ ] len
-    - [ ] head and tail
-    - [ ] last
-    - [ ] indexing (?)
-    - [ ] append
+    - [x] len
+    - [x] head and tail
+    - [x] last
+    - [x] indexing (?) -- added some sort of indexing
+    - [x] append
 - [ ] n-tuple type
+- [ ] tail call optimization
