@@ -243,6 +243,15 @@ fn print_builtin_runs() {
 }
 
 #[test]
+fn println_builtin_runs() {
+    // `println` prints a string and a trailing newline via `@puts`.
+    match run(r#"println "hello";"#, false) {
+        Ok(codegen::ExecutionResult::Unit) => {}
+        other => panic!("expected Unit, got {other:?}"),
+    }
+}
+
+#[test]
 fn print_is_first_class() {
     // `map print xs` passes the builtin as a function value.
     match run(r#"map print ["a", "b", "c"];"#, true) {

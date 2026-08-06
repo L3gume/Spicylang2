@@ -71,10 +71,8 @@
 ; Variables
 (variable) @variable
 
-; Function calls
-(application_expression
-  function: (variable) @function)
-
+; Function calls — the `function` field is always an `application_expression`
+; (even for a bare name), so match the variable inside it.
 (application_expression
   function: (application_expression
     (variable) @function))

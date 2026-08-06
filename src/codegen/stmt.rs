@@ -120,24 +120,108 @@ fn lower_expr_stmt<'a, 'b>(
 /// through the ordinary application path (`lower_variable` -> `call_indirect`)
 /// instead of special dispatch.
 ///
-/// Each builtin is a real `func.func` with a body. Only `print` is implemented
-/// here so far; the remaining builtins are seeded in the type context (see
-/// [`crate::types::builtins`]) and fail at codegen with a clear error until
-/// they get a body here.
+/// Each builtin is a real `func.func` with a body. The remaining builtins are
+/// seeded in the type context (see [`crate::types::builtins`]); their emitters
+/// are still stubs that report "not implemented yet", so a use site fails in
+/// `lower_variable` with a clear error until each gets a body here.
 pub(crate) fn register_runtime_builtins<'a>(module: &mut Module<'a>) -> Result<(), String> {
     ensure_printf(module)?;
+    ensure_puts(module)?;
 
+    // `register_builtin` runs every emitter: implemented ones emit their
+    // `func.func` and register a symbol, while stubs report the
+    // "not implemented yet" error, which is skipped so compiling a program
+    // that never mentions them still succeeds.
+    register_builtin(module, emit_print)?;
+    register_builtin(module, emit_println)?;
+    register_builtin(module, emit_itostr)?;
+    register_builtin(module, emit_ftostr)?;
+    register_builtin(module, emit_btostr)?;
+    register_builtin(module, emit_strtoi)?;
+    register_builtin(module, emit_strtof)?;
+    register_builtin(module, emit_strtob)?;
+    register_builtin(module, emit_itof)?;
+    register_builtin(module, emit_ftoi)?;
+    register_builtin(module, emit_readin)?;
+    Ok(())
+}
+
+/// Run a builtin emitter, treating the "not implemented yet" stub error as a
+/// skip: the builtin simply stays out of [`Module::symbols`] until it gets a
+/// body. Any other error is propagated.
+fn register_builtin<'a>(
+    module: &mut Module<'a>,
+    emit: impl FnOnce(&mut Module<'a>) -> Result<(), String>,
+) -> Result<(), String> {
+    match emit(module) {
+        Err(e) if e.ends_with("not implemented yet") => Ok(()),
+        result => result,
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Builtin type mapping
+// ----------------------------------------------------------------------------
+
+/// The MLIR types the runtime builtins operate on.
+///
+/// Unit is lowered to `i32` because LLVM has no unit type: `str -> unit`
+/// becomes `(!llvm.ptr) -> i32` and `unit -> str` becomes `(i32) -> !llvm.ptr`.
+struct BuiltinTypes<'a> {
+    int: Type<'a>,
+    float: Type<'a>,
+    bool: Type<'a>,
+    string: Type<'a>,
+    unit: Type<'a>,
+}
+
+impl<'a> BuiltinTypes<'a> {
+    fn new(module: &Module<'a>) -> Result<BuiltinTypes<'a>, String> {
+        Ok(BuiltinTypes {
+            int: IntegerType::new(module.context, 32).into(),
+            float: Type::float32(module.context),
+            bool: IntegerType::new(module.context, 1).into(),
+            string: Type::parse(module.context, "!llvm.ptr")
+                .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?,
+            unit: IntegerType::new(module.context, 32).into(),
+        })
+    }
+}
+
+/// Stub for a builtin whose body has not been written yet.
+///
+/// `signature` is the intended `func.func` type, spelled out at each call
+/// site.
+///
+/// TODO(body): emit the entry block and body, append `func.return`, register
+/// `signature` in [`Module::symbols`], and return `Ok(())` instead. Until
+/// then, the builtin stays out of `symbols`, so a use site fails in
+/// `lower_variable` with this "not implemented yet" error.
+fn stub_builtin(name: &str, _signature: FunctionType<'_>) -> Result<(), String> {
+    Err(format!("codegen: builtin `{name}` is not implemented yet"))
+}
+
+// ----------------------------------------------------------------------------
+// Individual builtins
+// ----------------------------------------------------------------------------
+
+/// `print : str -> unit`, lowered as `func.func @print(!llvm.ptr) -> i32`.
+///
+/// The body forwards to `@printf`:
+///
+/// ```text
+/// @print(%arg0: !llvm.ptr) -> i32 {
+///   %0 = llvm.ptrtoint %arg0 : !llvm.ptr to i64
+///   %1 = func.call @printf(%0) : (i64) -> i32
+///   return %1 : i32
+/// }
+/// ```
+fn emit_print<'a>(module: &mut Module<'a>) -> Result<(), String> {
     let location = Location::unknown(module.context);
-    let ptr = Type::parse(module.context, "!llvm.ptr")
-        .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
-    let i32_type: Type = IntegerType::new(module.context, 32).into();
+    let t = BuiltinTypes::new(module)?;
     let i64_type: Type = IntegerType::new(module.context, 64).into();
 
-    // @print(!llvm.ptr) -> i32
-    //   %0 = llvm.ptrtoint %arg0 : !llvm.ptr to i64
-    //   %1 = func.call @printf(%0) : (i64) -> i32
-    //   return %1 : i32
-    let block = Block::new(&[(ptr, location)]);
+    let block = Block::new(&[(t.string, location)]);
     let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
     let ptrtoint = OperationBuilder::new("llvm.ptrtoint", location)
         .add_operands(&[arg])
@@ -153,7 +237,7 @@ pub(crate) fn register_runtime_builtins<'a>(module: &mut Module<'a>) -> Result<(
         module.context,
         FlatSymbolRefAttribute::new(module.context, "printf"),
         &[arg_i64],
-        &[i32_type],
+        &[t.unit],
         location,
     );
     let result: Value<'_, '_> = block
@@ -163,7 +247,7 @@ pub(crate) fn register_runtime_builtins<'a>(module: &mut Module<'a>) -> Result<(
         .into();
     block.append_operation(func::r#return(&[result], location));
 
-    let function_type = FunctionType::new(module.context, &[ptr], &[i32_type]);
+    let function_type = FunctionType::new(module.context, &[t.string], &[t.unit]);
     let region = Region::new();
     region.append_block(block);
 
@@ -179,6 +263,123 @@ pub(crate) fn register_runtime_builtins<'a>(module: &mut Module<'a>) -> Result<(
     module.symbols.insert("print".to_string(), function_type);
     module.functions += 1;
     Ok(())
+}
+
+/// `println : str -> unit`, lowered as `func.func @println(!llvm.ptr) -> i32`.
+///
+/// The body forwards to `@puts`, which appends a trailing newline itself:
+///
+/// ```text
+/// @println(%arg0: !llvm.ptr) -> i32 {
+///   %0 = llvm.ptrtoint %arg0 : !llvm.ptr to i64
+///   %1 = func.call @puts(%0) : (i64) -> i32
+///   return %1 : i32
+/// }
+/// ```
+fn emit_println<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
+    let t = BuiltinTypes::new(module)?;
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
+
+    let block = Block::new(&[(t.string, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+    let ptrtoint = OperationBuilder::new("llvm.ptrtoint", location)
+        .add_operands(&[arg])
+        .add_results(&[i64_type])
+        .build()
+        .map_err(|e| e.to_string())?;
+    let arg_i64: Value<'_, '_> = block
+        .append_operation(ptrtoint)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "puts"),
+        &[arg_i64],
+        &[t.unit],
+        location,
+    );
+    let result: Value<'_, '_> = block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &[t.string], &[t.unit]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "println"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("println".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
+}
+
+/// `itostr : int -> str`, i.e. `func.func @itostr(i32) -> !llvm.ptr`.
+fn emit_itostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("itostr", FunctionType::new(module.context, &[t.int], &[t.string]))
+}
+
+/// `ftostr : float -> str`, i.e. `func.func @ftostr(f32) -> !llvm.ptr`.
+fn emit_ftostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("ftostr", FunctionType::new(module.context, &[t.float], &[t.string]))
+}
+
+/// `btostr : bool -> str`, i.e. `func.func @btostr(i1) -> !llvm.ptr`.
+fn emit_btostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("btostr", FunctionType::new(module.context, &[t.bool], &[t.string]))
+}
+
+/// `strtoi : str -> int`, i.e. `func.func @strtoi(!llvm.ptr) -> i32`.
+fn emit_strtoi<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("strtoi", FunctionType::new(module.context, &[t.string], &[t.int]))
+}
+
+/// `strtof : str -> float`, i.e. `func.func @strtof(!llvm.ptr) -> f32`.
+fn emit_strtof<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("strtof", FunctionType::new(module.context, &[t.string], &[t.float]))
+}
+
+/// `strtob : str -> bool`, i.e. `func.func @strtob(!llvm.ptr) -> i1`.
+fn emit_strtob<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("strtob", FunctionType::new(module.context, &[t.string], &[t.bool]))
+}
+
+/// `itof : int -> float`, i.e. `func.func @itof(i32) -> f32`.
+fn emit_itof<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("itof", FunctionType::new(module.context, &[t.int], &[t.float]))
+}
+
+/// `ftoi : float -> int`, i.e. `func.func @ftoi(f32) -> i32`.
+fn emit_ftoi<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("ftoi", FunctionType::new(module.context, &[t.float], &[t.int]))
+}
+
+/// `readin : unit -> str`, i.e. `func.func @readin(i32) -> !llvm.ptr`.
+///
+/// TODO(body): read a line from stdin; the `unit` argument is the `i32`
+/// stand-in.
+fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let t = BuiltinTypes::new(module)?;
+    stub_builtin("readin", FunctionType::new(module.context, &[t.unit], &[t.string]))
 }
 
 /// Emit the external declaration `func.func @printf(i64) -> i32` once.
@@ -207,6 +408,37 @@ fn ensure_printf<'a>(module: &mut Module<'a>) -> Result<(), String> {
     );
     module.module.body().append_operation(function);
     module.printf_declared = true;
+    Ok(())
+}
+
+/// Emit the external declaration `func.func @puts(i64) -> i32` once.
+///
+/// `puts` is the C-library "print string, then newline" function backing the
+/// `println` builtin. Like `printf`, it is declared with only built-in types
+/// so the `func_to_llvm` pass can convert it cleanly.
+fn ensure_puts<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    if module.puts_declared {
+        return Ok(());
+    }
+    let location = Location::unknown(module.context);
+    let function_type = FunctionType::new(
+        module.context,
+        &[IntegerType::new(module.context, 64).into()],
+        &[IntegerType::new(module.context, 32).into()],
+    );
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "puts"),
+        TypeAttribute::new(function_type.into()),
+        Region::new(),
+        &[(
+            Identifier::new(module.context, "sym_visibility"),
+            StringAttribute::new(module.context, "private").into(),
+        )],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.puts_declared = true;
     Ok(())
 }
 
@@ -286,11 +518,11 @@ pub fn lower_decl<'a>(
     // A function-valued application (e.g. `let sum = lfold add 0;`): keep the
     // expression and inline it at use sites, so partial applications become
     // full applications instead of first-class closure values.
-    if let ENode::Application(..) = &*e2.e {
-        if !super::apply::is_scalar_type(&e2.typ) {
-            module.inlineable.insert(name, e2.clone());
-            return Ok(());
-        }
+    if let ENode::Application(..) = &*e2.e
+        && !super::apply::is_scalar_type(&e2.typ)
+    {
+        module.inlineable.insert(name, e2.clone());
+        return Ok(());
     }
 
     let location = Location::unknown(module.context);
@@ -345,7 +577,7 @@ pub fn lower_decl<'a>(
 /// later uses of it in `lower_type` can be resolved:
 ///   - `enum E <tvars> = ...`  registers [`EnumLayout`] under the enum name.
 ///   - `type E <tvars> = T`    registers the alias' expanded right-hand side
-///                             under the alias name.
+///     under the alias name.
 ///
 /// The type checker has already rejected duplicate/conflicting declarations,
 /// so the name collisions checked here are defensive only.

@@ -13,7 +13,7 @@
     - [x] Make repl jit-compiled
 - [ ] Better parser + lexer
     - [x] allow exprstmt in block
-    - [ ] Location info in AST
+    - [x] Location info in AST
     - [ ] Better error messages in parse and typecheck
     - [x] Support comments
 - [ ] Pretty-printing of type and AST nodes

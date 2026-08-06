@@ -116,6 +116,8 @@ pub struct Module<'a> {
     strings: usize,
     /// Whether the external `printf` declaration has been emitted.
     printf_declared: bool,
+    /// Whether the external `puts` declaration has been emitted.
+    puts_declared: bool,
     /// Whether the external `malloc` declaration has been emitted.
     malloc_declared: bool,
     /// Types of the top-level `func.func` symbols, keyed by name; a
@@ -158,6 +160,7 @@ impl<'a> Module<'a> {
             aliases: HashMap::new(),
             strings: 0,
             printf_declared: false,
+            puts_declared: false,
             malloc_declared: false,
             symbols: HashMap::new(),
             closures: 0,

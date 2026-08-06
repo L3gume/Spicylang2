@@ -11,5 +11,7 @@ match get_res (get_none 1)
 | Err msg => print msg
 | _ => print "failed";
 
+println "";
+
 let helloworld = ["hello", ", ", "world"];
-iter print helloworld;
+iter println helloworld;
