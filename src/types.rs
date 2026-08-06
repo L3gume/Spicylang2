@@ -426,13 +426,13 @@ pub fn unify(typ1 : &Monotype, typ2 : &Monotype) -> Result<Substitution, Unifica
                     Ok(Substitution::new())
                 } else {
                     if typ2.contains(typ1) {
-                        Err(UnificationError { message: "Infinite recursive type".to_string() })
+                        Err(UnificationError { pos: None, message: "Infinite recursive type".to_string() })
                     } else {
                         Ok(Substitution::make(HashMap::from([(v1.clone(), typ2.clone())])))
                     }
                 },
             _ => if typ2.contains(typ1) {
-                    Err(UnificationError { message: "Infinite recursive type".to_string() })
+                    Err(UnificationError { pos: None, message: "Infinite recursive type".to_string() })
                 } else {
                     Ok(Substitution::make(HashMap::from([(v1.clone(), typ2.clone())])))
                 }
@@ -441,10 +441,10 @@ pub fn unify(typ1 : &Monotype, typ2 : &Monotype) -> Result<Substitution, Unifica
             Monotype::TypeVariable(_) => unify(typ2, typ1),
             Monotype::TypeFuncApplication(f2, ts2 ) =>
                 if f1 != f2 {
-                    Err(UnificationError { message: format!("Type function application mismatch: {:?} != {:?} (full: {:?} vs {:?})", f1, f2, typ1, typ2) })
+                    Err(UnificationError { pos: None, message: format!("Type function application mismatch: {:?} != {:?} (full: {:?} vs {:?})", f1, f2, typ1, typ2) })
                 } else {
                     if ts1.len() != ts2.len() {
-                        Err(UnificationError { message: format!("Type functions have different number of args: {:?}, {:?}", ts1, ts2) })
+                        Err(UnificationError { pos: None, message: format!("Type functions have different number of args: {:?}, {:?}", ts1, ts2) })
                     } else {
                         let mut sub = Substitution::new();
                         for (t1, t2) in ts1.iter().zip(ts2.iter()) {
@@ -459,8 +459,19 @@ pub fn unify(typ1 : &Monotype, typ2 : &Monotype) -> Result<Substitution, Unifica
 
 #[derive(Debug, PartialEq)]
 pub struct UnificationError {
-    pub message : String
-    // TODO: location information?
+    pub message : String,
+    /// The source position of the offending expression/statement, if known.
+    pub pos : Option<crate::ast::Pos>,
+}
+
+impl UnificationError {
+    /// Attach a source position, keeping an existing one if already set.
+    pub fn with_pos(mut self, pos: crate::ast::Pos) -> Self {
+        if self.pos.is_none() && !pos.is_nil() {
+            self.pos = Some(pos);
+        }
+        self
+    }
 }
 
 impl std::fmt::Display for UnificationError {
@@ -488,10 +499,10 @@ fn expand(typ : &Monotype, context : &mut TypeContext, visited : &mut Vec<String
                     None => Ok(Monotype::TypeFuncApplication(func.clone(), expanded_args)),
                     Some(alias) => {
                         if visited.contains(name) {
-                            return Err(UnificationError { message: format!("Recursive type alias: {}", name) });
+                            return Err(UnificationError { pos: None, message: format!("Recursive type alias: {}", name) });
                         }
                         if expanded_args.len() != alias.params.len() {
-                            return Err(UnificationError { message: format!("Type alias `{}` expects {} argument(s), got {}", name, alias.params.len(), expanded_args.len()) });
+                            return Err(UnificationError { pos: None, message: format!("Type alias `{}` expects {} argument(s), got {}", name, alias.params.len(), expanded_args.len()) });
                         }
                         let mut sub : HashMap<String, Monotype> = HashMap::new();
                         for (p, a) in alias.params.iter().zip(expanded_args.iter()) {
@@ -519,7 +530,7 @@ fn check_undeclared(typ : &Monotype, declared : &[String]) -> Result<(), Unifica
     if undeclared.is_empty() {
         Ok(())
     } else {
-        Err(UnificationError { message: format!("Undeclared type variable(s): {:?}", undeclared) })
+        Err(UnificationError { pos: None, message: format!("Undeclared type variable(s): {:?}", undeclared) })
     }
 }
 
@@ -537,10 +548,10 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
     match dec {
         TypeDec::Enum(variants) => {
             if context.get_alias(&header.n).is_some() {
-                return Err(UnificationError { message: format!("`{}` is already declared as a type alias", header.n) });
+                return Err(UnificationError { pos: None, message: format!("`{}` is already declared as a type alias", header.n) });
             }
             if context.has_enum_name(&header.n) {
-                return Err(UnificationError { message: format!("Enum `{}` is already declared", header.n) });
+                return Err(UnificationError { pos: None, message: format!("Enum `{}` is already declared", header.n) });
             }
             context.add_enum_name(header.n.clone());
             let enum_typ = Monotype::enum_app(header.n.clone(), fresh_vars);
@@ -558,10 +569,10 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
         },
         TypeDec::Alias(rhs) => {
             if context.get_alias(&header.n).is_some() {
-                return Err(UnificationError { message: format!("Type alias `{}` is already declared", header.n) });
+                return Err(UnificationError { pos: None, message: format!("Type alias `{}` is already declared", header.n) });
             }
             if context.has_enum_name(&header.n) {
-                return Err(UnificationError { message: format!("`{}` is already declared as an enum", header.n) });
+                return Err(UnificationError { pos: None, message: format!("`{}` is already declared as an enum", header.n) });
             }
             let elaborated = rhs.t.instantiate(&mut mapping);
             check_undeclared(&elaborated, &fresh_names)?;
@@ -588,7 +599,7 @@ fn check_exhaustive(match_t : &Monotype, cases : &[MatchCase]) -> Result<(), Uni
             if has_true && has_false {
                 Ok(())
             } else {
-                Err(UnificationError { message: "Match on `bool` is not exhaustive: cover both `true` and `false`".to_string() })
+                Err(UnificationError { pos: None, message: "Match on `bool` is not exhaustive: cover both `true` and `false`".to_string() })
             }
         },
         Monotype::TypeFuncApplication(f, _) if **f == TypeFunc::List => {
@@ -597,10 +608,10 @@ fn check_exhaustive(match_t : &Monotype, cases : &[MatchCase]) -> Result<(), Uni
             if covers_empty && covers_nonempty {
                 Ok(())
             } else {
-                Err(UnificationError { message: "Match on a list is not exhaustive: cover both `[]` and a `x::xs` pattern".to_string() })
+                Err(UnificationError { pos: None, message: "Match on a list is not exhaustive: cover both `[]` and a `x::xs` pattern".to_string() })
             }
         },
-        _ => Err(UnificationError { message: format!("Match on {:?} is not exhaustive: add a catch-all variable pattern", match_t) }),
+        _ => Err(UnificationError { pos: None, message: format!("Match on {:?} is not exhaustive: add a catch-all variable pattern", match_t) }),
     }
 }
 
@@ -621,7 +632,7 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
             Some(poly) => {
                 Ok((Substitution::new(), poly.instantiate(context, None)))
             }
-            _ => Err(UnificationError { message: format!("Undefined variable {}!", name) } )
+            _ => Err(UnificationError { pos: None, message: format!("Undefined variable {}!", name) } )
         },
         ENode::Abstraction(bind, exp) => {
             let Binding(name, typp) = &**bind;
@@ -648,7 +659,7 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
         },
         ENode::Let(name, exp1, exp2) => {
             if TypeContext::is_builtin(name) {
-                return Err(UnificationError { message: format!("Redefinition of builtin function '{}' not allowed", name) });
+                return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", name) });
             }
             let rec_var = Monotype::var(context.new_typevar());
             let old_binding = context.get(name);
@@ -687,10 +698,10 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
                     SNode::Decl(e1, t1, e2) => {
                         let var_name = match &*e1.e {
                             ENode::Variable(name) => name.clone(),
-                            _ => return Err(UnificationError { message: "Expected a variable name in declaration".to_string() }),
+                            _ => return Err(UnificationError { pos: None, message: "Expected a variable name in declaration".to_string() }),
                         };
                         if TypeContext::is_builtin(&var_name) {
-                            return Err(UnificationError { message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
+                            return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
                         }
                         let binding_type = type_to_typefn(t1, context)?;
                         let old_binding = context.get(&var_name);
@@ -715,6 +726,7 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
                         combined = combined.combine(s1);
                     },
                     SNode::TypeDecl(_, _) => return Err(UnificationError {
+                        pos: None,
                         message: "Type declarations are not allowed inside block expressions".to_string()
                     }),
                 }
@@ -788,12 +800,12 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
                         unify(&unified, &Monotype::int())
                             .or_else(|_| unify(&unified, &Monotype::float()))
                             .or_else(|_| unify(&unified, &Monotype::string()))
-                            .map_err(|_| UnificationError { message: format!("'+' requires int, float, or string operands, got {:?}", unified) })?;
+                            .map_err(|_| UnificationError { pos: None, message: format!("'+' requires int, float, or string operands, got {:?}", unified) })?;
                     },
                     _ => {
                         unify(&unified, &Monotype::int())
                             .or_else(|_| unify(&unified, &Monotype::float()))
-                            .map_err(|_| UnificationError { message: format!("{:?} requires int or float operands, got {:?}", op, unified) })?;
+                            .map_err(|_| UnificationError { pos: None, message: format!("{:?} requires int or float operands, got {:?}", op, unified) })?;
                     },
                 }
             }
@@ -809,19 +821,19 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
                 match op {
                     CompOp::Eq | CompOp::NotEq => {
                         if let Monotype::TypeFuncApplication(f, _) = &unified && **f == TypeFunc::Fn {
-                            return Err(UnificationError { message: "Cannot compare function types".to_string() });
+                            return Err(UnificationError { pos: None, message: "Cannot compare function types".to_string() });
                         }
                         let op_name = if *op == CompOp::Eq { "==" } else { "!=" };
                         unify(&unified, &Monotype::int())
                             .or_else(|_| unify(&unified, &Monotype::float()))
                             .or_else(|_| unify(&unified, &Monotype::string()))
                             .or_else(|_| unify(&unified, &Monotype::bool()))
-                            .map_err(|_| UnificationError { message: format!("'{}' requires int, float, string, or bool operands", op_name) })?;
+                            .map_err(|_| UnificationError { pos: None, message: format!("'{}' requires int, float, string, or bool operands", op_name) })?;
                     },
                     _ => {
                         unify(&unified, &Monotype::int())
                             .or_else(|_| unify(&unified, &Monotype::float()))
-                            .map_err(|_| UnificationError { message: "Comparison requires int or float operands".to_string() })?;
+                            .map_err(|_| UnificationError { pos: None, message: "Comparison requires int or float operands".to_string() })?;
                     },
                 }
             }
@@ -834,7 +846,7 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
             let s3 = unify(&t1.apply(&s2), &t2)?;
             let unified = t1.apply(&s2).apply(&s3);
             let s4 = unify(&unified, &Monotype::bool())
-                .map_err(|_| UnificationError { message: format!("Logical operations require bool operands, got {:?}", unified) })?;
+                .map_err(|_| UnificationError { pos: None, message: format!("Logical operations require bool operands, got {:?}", unified) })?;
             Ok((s1.combine(s2).combine(s3).combine(s4), Monotype::bool()))
         },
         ENode::Unary(op, e) => match op {
@@ -846,7 +858,7 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
                 }
                 let s2 = unify(&t1, &Monotype::int())
                     .or_else(|_| unify(&t1, &Monotype::float()))
-                    .map_err(|_| UnificationError { message: format!("Unary negation requires int or float operand, got {:?}", t1) })?;
+                    .map_err(|_| UnificationError { pos: None, message: format!("Unary negation requires int or float operand, got {:?}", t1) })?;
                 let s3 = s1.combine(s2);
                 *context = context.apply(&s3);
                 Ok((s3.clone(), t1.apply(&s3)))
@@ -899,7 +911,7 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
                     },
                     ENode::Variable(name) => {
                         let poly = context.get(name).ok_or_else(||
-                            UnificationError { message: format!("Undefined constructor {}", name) })?;
+                            UnificationError { pos: None, message: format!("Undefined constructor {}", name) })?;
                         let mut ctor = poly.instantiate(context, None);
                         let mut combined = Substitution::new();
                         for a in args.iter().rev() {
@@ -914,6 +926,7 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
                                     continue;
                             }
                             return Err(UnificationError {
+                                pos: None,
                                 message: format!("Constructor `{}` applied to too many arguments", name)
                             });
                         }
@@ -921,6 +934,7 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
                         return Ok(combined.combine(s_last));
                     },
                     _ => return Err(UnificationError {
+                        pos: None,
                         message: "Constructor pattern must be a constructor name applied to arguments".to_string()
                     }),
                 }
@@ -939,7 +953,7 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
             }
             Ok(combined)
         },
-        _ => Err(UnificationError { message: format!("Unsupported pattern {:?}", expr) }),
+        _ => Err(UnificationError { pos: None, message: format!("Unsupported pattern {:?}", expr) }),
     }
 }
 

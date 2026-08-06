@@ -46,11 +46,18 @@ pub fn repl_loop(initial: Option<Box<ast::Program>>) {
                 let mut full = Box::new(ast::Program {
                     stmts: accumulated_stmts.clone(),
                     ctx: types::TypeContext::new(),
+                    source_name: "<repl>".to_string(),
                 });
 
                 match ast::Program::typecheck(&mut full) {
                     Err(e) => {
-                        eprintln!("type error: {}", e);
+                        match e.pos {
+                            Some(ref pos) => eprintln!(
+                                "type error: {}:{}:{}: {}",
+                                full.source_name, pos.start_line, pos.start_col, e.message
+                            ),
+                            None => eprintln!("type error: {}", e.message),
+                        }
                         accumulated_stmts.truncate(accumulated_stmts.len() - new_count);
                     }
                     Ok(()) => {

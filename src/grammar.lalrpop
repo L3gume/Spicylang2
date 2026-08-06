@@ -5,14 +5,16 @@ use std::str::FromStr;
 
 grammar;
 
-// TODO: Investigate better parser with comments and location info on AST node for better error messages
 match {
     r"\s+" => { }, // Skip whitespace (disables default behavior if custom ignore patterns are present)
     r"#[^\n\r]*[\n\r]*" => { }, // Skip single-line // comments
     _, // Catch-all: identity-map any terminal literals used in the grammar
 }
 
-pub Prog: Box<Program> = <ss:SemiCol<Stmt>> => Box::new(Program { stmts : ss, ctx : TypeContext::new() });
+// Productions that build an `Expr`/`Stmt` bind `@L`/`@R` (the production's
+// byte-offset start/end) into `start`/`end`; `Program::parse` converts these
+// into line/column spans afterwards.
+pub Prog: Box<Program> = <ss:SemiCol<Stmt>> => Box::new(Program { stmts : ss, ctx : TypeContext::new(), source_name : String::new() });
 
 // ----------------------------------------------------------------------------
 // Types
@@ -58,8 +60,8 @@ BuiltinType: Box<Type> = {
 };
 
 TypeDecl: Stmt = {
-    "type" <h:TypeHeader> <t:Type>              => Stmt::from(SNode::TypeDecl(h, Box::new(TypeDec::Alias(t)))),
-    "enum "<h:TypeHeader> <vs:Pipe<Variant>>    => Stmt::from(SNode::TypeDecl(h, Box::new(TypeDec::Enum(vs))))
+    <start:@L> "type" <h:TypeHeader> <t:Type> <end:@R>              => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::TypeDecl(h, Box::new(TypeDec::Alias(t)))),
+    <start:@L> "enum "<h:TypeHeader> <vs:Pipe<Variant>> <end:@R>    => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::TypeDecl(h, Box::new(TypeDec::Enum(vs))))
 }
 
 TypeHeader: TypeHeader = {
@@ -97,9 +99,9 @@ pub Stmt: Stmt = {
 // expression-completion states' lookahead sets and produce reduce/shift
 // conflicts on every binary operator.
 BlockStmt: Stmt = {
-    "let" <n:Name> ":" <t:Type> "=" <e:Expr>    => Stmt::from(SNode::Decl(Box::new(Expr::from(ENode::Variable(n))), t, e)),
-    "let" <n:Name> "=" <e:Expr>                 => Stmt::from(SNode::Decl(Box::new(Expr::from(ENode::Variable(n))), Box::new(Type { t : Monotype::infer() }), e)),
-    <e:Expr>    => Stmt::from(SNode::Expr(e)),
+    <start:@L> "let" <n:Name> ":" <t:Type> "=" <e:Expr> <end:@R>    => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::Decl(Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Variable(n))), t, e)),
+    <start:@L> "let" <n:Name> "=" <e:Expr> <end:@R>                 => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::Decl(Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Variable(n))), Box::new(Type { t : Monotype::infer() }), e)),
+    <start:@L> <e:Expr> <end:@R>                                    => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::Expr(e)),
 };
 
 // Zero or more BlockStmt;s for the statement prefix of a block expression.
@@ -120,9 +122,9 @@ BlkBody: Vec<Stmt> = {
 
 pub Expr: Box<Expr> = {
     Abs_Expr                                            => <>,
-    "let" <n:Name> "=" <e1:Expr> "in" <e2:Expr>         => Box::new(Expr::from(ENode::Let(n, e1, e2))),
-    "if" <c:Expr> "then" <e1:Expr> "else" <e2:Expr>     => Box::new(Expr::from(ENode::IfElse(c, e1, e2))),
-    "match" <e:ConsExpr> "|" <cs:Pipe<MatchCase>>       => Box::new(Expr::from(ENode::Match(e, cs))),
+    <start:@L> "let" <n:Name> "=" <e1:Expr> "in" <e2:Expr> <end:@R>         => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Let(n, e1, e2))),
+    <start:@L> "if" <c:Expr> "then" <e1:Expr> "else" <e2:Expr> <end:@R>     => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::IfElse(c, e1, e2))),
+    <start:@L> "match" <e:ConsExpr> "|" <cs:Pipe<MatchCase>> <end:@R>       => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Match(e, cs))),
     ConsExpr                                            => <>,
 };
 
@@ -132,26 +134,26 @@ MatchCase: MatchCase = {
 
 ConsExpr: Box<Expr> = {
     ExprBase                                            => <>,
-    <e1:ConsOperand> "::" <e2:ConsExpr>                 => Box::new(Expr::from(ENode::Cons(e1, e2))),
+    <start:@L> <e1:ConsOperand> "::" <e2:ConsExpr> <end:@R>                 => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Cons(e1, e2))),
 };
 
 ConsOperand: Box<Expr> = {
     UnaryExpr                                           => <>,
-    "{" <ss:BlkBody> <e:Expr> "}"                       => Box::new(Expr::from(ENode::Block(ss, e))),
+    <start:@L> "{" <ss:BlkBody> <e:Expr> "}" <end:@R>                       => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Block(ss, e))),
 };
 
 ExprBase: Box<Expr> = {
     LogExpr                                             => <>,
-    "{" <ss:BlkBody> <e:Expr> "}"                       => Box::new(Expr::from(ENode::Block(ss, e))),
+    <start:@L> "{" <ss:BlkBody> <e:Expr> "}" <end:@R>                       => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Block(ss, e))),
 };
 
 // Multi-binder sugar: `\x y z => body` desugars to `\x => \y => \z => body`.
 // Explicit nested abstractions still parse (body is a full Expr).
 Abs_Expr: Box<Expr> = {
-    "\\" <mut bs:Binding+> "=>" <t:Expr> => {
+    <start:@L> "\\" <mut bs:Binding+> "=>" <t:Expr> <end:@R> => {
         let mut e = t;
         while let Some(b) = bs.pop() {
-            e = Box::new(Expr::from(ENode::Abstraction(b, e)));
+            e = Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Abstraction(b, e)));
         }
         e
     }
@@ -160,55 +162,55 @@ Abs_Expr: Box<Expr> = {
 // --- Lowest precedence: logical (||, &&, ^) ---
 LogExpr: Box<Expr> = {
     CmpExpr => <>,
-    <e1:LogExpr> "||" <e2:CmpExpr> => Box::new(Expr::from(ENode::Logical(LogicalOp::Or, e1, e2))),
-    <e1:LogExpr> "&&" <e2:CmpExpr> => Box::new(Expr::from(ENode::Logical(LogicalOp::And, e1, e2))),
-    <e1:LogExpr> "^"  <e2:CmpExpr> => Box::new(Expr::from(ENode::Logical(LogicalOp::Xor, e1, e2))),
+    <start:@L> <e1:LogExpr> "||" <e2:CmpExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Logical(LogicalOp::Or, e1, e2))),
+    <start:@L> <e1:LogExpr> "&&" <e2:CmpExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Logical(LogicalOp::And, e1, e2))),
+    <start:@L> <e1:LogExpr> "^"  <e2:CmpExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Logical(LogicalOp::Xor, e1, e2))),
 }
 
 // --- Comparison (==, !=, <, >, <=, >=) ---
 CmpExpr: Box<Expr> = {
     AddExpr => <>,
-    <e1:AddExpr> "==" <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::Eq, e1, e2))),
-    <e1:AddExpr> "!=" <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::NotEq, e1, e2))),
-    <e1:AddExpr> "<"  <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::Less, e1, e2))),
-    <e1:AddExpr> ">"  <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::Greater, e1, e2))),
-    <e1:AddExpr> "<=" <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::LessEq, e1, e2))),
-    <e1:AddExpr> ">=" <e2:AddExpr> => Box::new(Expr::from(ENode::Comparison(CompOp::GreatEq, e1, e2))),
+    <start:@L> <e1:AddExpr> "==" <e2:AddExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Comparison(CompOp::Eq, e1, e2))),
+    <start:@L> <e1:AddExpr> "!=" <e2:AddExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Comparison(CompOp::NotEq, e1, e2))),
+    <start:@L> <e1:AddExpr> "<"  <e2:AddExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Comparison(CompOp::Less, e1, e2))),
+    <start:@L> <e1:AddExpr> ">"  <e2:AddExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Comparison(CompOp::Greater, e1, e2))),
+    <start:@L> <e1:AddExpr> "<=" <e2:AddExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Comparison(CompOp::LessEq, e1, e2))),
+    <start:@L> <e1:AddExpr> ">=" <e2:AddExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Comparison(CompOp::GreatEq, e1, e2))),
 }
 
 // --- Addition/subtraction (+, -) ---
 AddExpr: Box<Expr> = {
     MulExpr => <>,
-    <e1:AddExpr> "+" <e2:MulExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Plus, e1, e2))),
-    <e1:AddExpr> "-" <e2:MulExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Minus, e1, e2))),
+    <start:@L> <e1:AddExpr> "+" <e2:MulExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Arithmetic(ArithOp::Plus, e1, e2))),
+    <start:@L> <e1:AddExpr> "-" <e2:MulExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Arithmetic(ArithOp::Minus, e1, e2))),
 }
 
 // --- Multiplication/division/modulo (*, /, %) ---
 MulExpr: Box<Expr> = {
     UnaryExpr => <>,
-    <e1:MulExpr> "*" <e2:UnaryExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Times, e1, e2))),
-    <e1:MulExpr> "/" <e2:UnaryExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Div, e1, e2))),
-    <e1:MulExpr> "%" <e2:UnaryExpr> => Box::new(Expr::from(ENode::Arithmetic(ArithOp::Mod, e1, e2))),
+    <start:@L> <e1:MulExpr> "*" <e2:UnaryExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Arithmetic(ArithOp::Times, e1, e2))),
+    <start:@L> <e1:MulExpr> "/" <e2:UnaryExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Arithmetic(ArithOp::Div, e1, e2))),
+    <start:@L> <e1:MulExpr> "%" <e2:UnaryExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Arithmetic(ArithOp::Mod, e1, e2))),
 }
 
 UnaryExpr: Box<Expr> = {
     AppExpr => <>,
-    "-" <e:UnaryExpr> => Box::new(Expr::from(ENode::Unary(UnaryOp::Negate, e))),
-    "!" <e:UnaryExpr> => Box::new(Expr::from(ENode::Unary(UnaryOp::Not, e))),
+    <start:@L> "-" <e:UnaryExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Unary(UnaryOp::Negate, e))),
+    <start:@L> "!" <e:UnaryExpr> <end:@R> => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Unary(UnaryOp::Not, e))),
 }
 
 // --- Function application (highest binary precedence) ---
 AppExpr: Box<Expr> = {
     Atom                        => <>,
-    <t1:AppExpr> <t2:Atom>      => Box::new(Expr::from(ENode::Application(t1, t2)))
+    <start:@L> <t1:AppExpr> <t2:Atom> <end:@R>      => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Application(t1, t2)))
 };
 
 // --- Atoms (primary expressions) ---
 Atom: Box<Expr> = {
-    Name                        => Box::new(Expr::from(ENode::Variable(<>))),
-    Literal                     => Box::new(Expr::from(ENode::Literal(<>))),
-    "[" "]"                     => Box::new(Expr::from(ENode::List(vec![]))),
-    "[" <es:CommaOne<Expr>> "]" => Box::new(Expr::from(ENode::List(es.into_iter().map(|b| *b).collect()))),
+    <start:@L> <n:Name> <end:@R>                        => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Variable(n))),
+    <start:@L> <l:Literal> <end:@R>                     => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Literal(l))),
+    <start:@L> "[" "]" <end:@R>                         => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::List(vec![]))),
+    <start:@L> "[" <es:CommaOne<Expr>> "]" <end:@R>     => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::List(es.into_iter().map(|b| *b).collect()))),
     "(" <e:Expr> ")"            => e
 };
 

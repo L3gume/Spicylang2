@@ -51,9 +51,16 @@ fn main() {
                     process::exit(1);
                 }
             };
+            prog.source_name = path.clone();
 
             if let Err(e) = Program::typecheck(&mut prog) {
-                eprintln!("typecheck: error: {}", e);
+                match e.pos {
+                    Some(ref pos) => eprintln!(
+                        "typecheck: error: {}:{}:{}: {}",
+                        prog.source_name, pos.start_line, pos.start_col, e.message
+                    ),
+                    None => eprintln!("typecheck: error: {}", e.message),
+                }
                 process::exit(2);
             }
             println!("typecheck: ok");

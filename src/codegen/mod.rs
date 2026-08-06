@@ -28,8 +28,9 @@ pub use stmt::lower;
 use crate::ast::*;
 use crate::types::Monotype;
 use melior::ir::{
+    operation::OperationLike,
     r#type::FunctionType,
-    Value,
+    Location, Value,
 };
 use std::collections::HashMap;
 
@@ -141,6 +142,9 @@ pub struct Module<'a> {
     /// The resolved Spicylang type of the `@__main` entry function's return
     /// value, used by the JIT to interpret the result slot.
     entry_return_monotype: Option<Monotype>,
+    /// Name of the source being compiled (file path or `"<repl>"`), attached
+    /// to generated MLIR locations.
+    source_name: String,
 }
 
 impl<'a> Module<'a> {
@@ -164,6 +168,7 @@ impl<'a> Module<'a> {
             let_counter: 0,
             constructors: HashMap::new(),
             entry_return_monotype: None,
+            source_name: String::new(),
         }
     }
 
@@ -172,9 +177,35 @@ impl<'a> Module<'a> {
         self.functions
     }
 
-    /// Print the module in MLIR textual form.
+    /// Set the source name used for generated MLIR locations.
+    pub fn set_source_name(&mut self, name: String) {
+        self.source_name = name;
+    }
+
+    /// The MLIR `Location` for an AST span, or `unknown` when the position is
+    /// nil or the module has no source name.
+    pub fn location(&self, pos: &crate::ast::Pos) -> Location<'a> {
+        if pos.is_nil() || self.source_name.is_empty() {
+            return Location::unknown(self.context);
+        }
+        Location::file_line_col_range(
+            self.context,
+            &self.source_name,
+            pos.start_line as usize,
+            pos.start_col as usize,
+            pos.end_line as usize,
+            pos.end_col as usize,
+        )
+    }
+
+    /// Print the module in MLIR textual form, including source locations.
     pub fn dump(&self) -> String {
-        self.module.as_operation().to_string()
+        self.module
+            .as_operation()
+            .to_string_with_flags(
+                melior::ir::operation::OperationPrintingFlags::new().enable_debug_info(true, true),
+            )
+            .unwrap_or_else(|_| self.module.as_operation().to_string())
     }
 
     /// Mutable access to the inner MLIR module (for running passes).

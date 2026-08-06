@@ -41,23 +41,24 @@ pub(crate) fn lower_expr<'c, 'a>(
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
 ) -> Result<Value<'c, 'a>, String> {
+    let location = module.location(&expr.pos);
     match &*expr.e {
-        ENode::Literal(lit) => lower_literal(lit, block, module),
-        ENode::Variable(_) => lower_variable(expr, block, module, env),
+        ENode::Literal(lit) => lower_literal(lit, block, module, location),
+        ENode::Variable(_) => lower_variable(expr, block, module, env, location),
         ENode::Abstraction(binding, body) => {
-            lower_abstraction(expr, binding, body, block, module, env)
+            lower_abstraction(expr, binding, body, block, module, env, location)
         }
-        ENode::Application(f, x) => lower_application(f, x, block, module, env),
-        ENode::Let(name, e1, e2) => lower_let(name, e1, e2, block, module, env),
-        ENode::IfElse(c, t, e) => lower_ifelse(c, t, e, &expr.typ, block, module, env),
+        ENode::Application(f, x) => lower_application(f, x, block, module, env, location),
+        ENode::Let(name, e1, e2) => lower_let(name, e1, e2, block, module, env, location),
+        ENode::IfElse(c, t, e) => lower_ifelse(c, t, e, &expr.typ, block, module, env, location),
         ENode::Block(stmts, e) => lower_block(stmts, e, block, module, env),
         ENode::Match(scrut, cases) => lower_match(scrut, cases, &expr.typ, block, module, env),
-        ENode::Comparison(op, a, b) => lower_comparison(op, a, b, block, module, env),
-        ENode::Arithmetic(op, a, b) => lower_arith(op, a, b, block, module, env),
-        ENode::Logical(op, a, b) => lower_logical(op, a, b, block, module, env),
-        ENode::Unary(op, e) => lower_unary(op, e, block, module, env),
-        ENode::List(es) => lower_list(es, block, module, env),
-        ENode::Cons(h, t) => lower_cons(h, t, block, module, env),
+        ENode::Comparison(op, a, b) => lower_comparison(op, a, b, block, module, env, location),
+        ENode::Arithmetic(op, a, b) => lower_arith(op, a, b, block, module, env, location),
+        ENode::Logical(op, a, b) => lower_logical(op, a, b, block, module, env, location),
+        ENode::Unary(op, e) => lower_unary(op, e, block, module, env, location),
+        ENode::List(es) => lower_list(es, block, module, env, location),
+        ENode::Cons(h, t) => lower_cons(h, t, block, module, env, location),
     }
 }
 
@@ -144,8 +145,8 @@ fn lower_arith<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let lhs = lower_expr(e1, block, module, env)?;
     let rhs = lower_expr(e2, block, module, env)?;
 
@@ -188,8 +189,8 @@ fn lower_comparison<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let lhs = lower_expr(e1, block, module, env)?;
     let rhs = lower_expr(e2, block, module, env)?;
 
@@ -236,8 +237,8 @@ fn lower_logical<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let lhs = lower_expr(e1, block, module, env)?;
     let rhs = lower_expr(e2, block, module, env)?;
     let op_name = match op {
@@ -259,8 +260,8 @@ fn lower_unary<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let value = lower_expr(e, block, module, env)?;
 
     match op {
@@ -311,8 +312,8 @@ fn lower_ifelse<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let condition = lower_expr(cond, block, module, env)?;
     let result_type = lower_type(&default_free_vars(result_mono), module)?;
 
@@ -399,7 +400,7 @@ fn lower_match<'c, 'a>(
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
+    let location = module.location(&scrutinee.pos);
     let scrut = lower_expr(scrutinee, block, module, env)?;
     let result_type = lower_type(&default_free_vars(result_mono), module)?;
     let scrut_typ = default_free_vars(&scrutinee.typ);
@@ -551,7 +552,7 @@ fn lower_match_cases<'c, 'a: 'b, 'b>(
     let cond: Value<'c, 'b> = match &*case.val.e {
         // `lit => e` matches when `scrut == lit`.
         ENode::Literal(lit) => {
-            let pattern = lower_literal(lit, block, module)?;
+            let pattern = lower_literal(lit, block, module, location)?;
             let cmp = arith::cmpi(
                 module.context,
                 arith::CmpiPredicate::Eq,
@@ -566,10 +567,10 @@ fn lower_match_cases<'c, 'a: 'b, 'b>(
                 .into()
         }
         // `[] => e` matches when the list is empty (null).
-        ENode::List(_) => list_is_null(scrut, block, module)?,
+        ENode::List(_) => list_is_null(scrut, block, module, location)?,
         // `x::xs => e` matches when the list is non-empty.
         ENode::Cons(..) => {
-            let is_null = list_is_null(scrut, block, module)?;
+            let is_null = list_is_null(scrut, block, module, location)?;
             let one = bool_constant(module, block, true, location)?;
             let not_null_op = arith_binop("arith.xori", is_null, one, location)?;
             block

@@ -1219,3 +1219,35 @@ use spicylang2::types::*;
         let result = Program::parse("(x;");
         assert!(result.is_err());
     }
+
+// ---- Positions ----
+
+#[test]
+fn stmt_positions_filled() {
+    let p = parse("let x = 1;\nx + 2;");
+    assert_eq!((p.stmts[0].pos.start_line, p.stmts[0].pos.start_col), (1, 1));
+    assert_eq!((p.stmts[0].pos.end_line, p.stmts[0].pos.end_col), (1, 10));
+    assert_eq!((p.stmts[1].pos.start_line, p.stmts[1].pos.start_col), (2, 1));
+    assert_eq!((p.stmts[1].pos.end_line, p.stmts[1].pos.end_col), (2, 6));
+}
+
+#[test]
+fn nested_expr_positions_filled() {
+    let p = parse("1 + 2 * 3;");
+    let SNode::Expr(e) = &*first(&p).s else { panic!("expected Expr") };
+    assert_eq!((e.pos.start_col, e.pos.end_col), (1, 10));
+    let ENode::Arithmetic(_, a, b) = &*e.e else { panic!("expected Arith") };
+    assert_eq!((a.pos.start_col, a.pos.end_col), (1, 2));       // `1`
+    assert_eq!((b.pos.start_col, b.pos.end_col), (5, 10));      // `2 * 3`
+    let ENode::Arithmetic(_, b1, b2) = &*b.e else { panic!("expected Arith") };
+    assert_eq!((b1.pos.start_col, b1.pos.end_col), (5, 6));     // `2`
+    assert_eq!((b2.pos.start_col, b2.pos.end_col), (9, 10));    // `3`
+}
+
+#[test]
+fn typecheck_error_carries_position() {
+    let mut p = parse("let x = 1;\nlet y = true;\nx + y;");
+    let err = Program::typecheck(&mut p).unwrap_err();
+    let pos = err.pos.expect("typecheck error should carry a position");
+    assert_eq!((pos.start_line, pos.start_col), (3, 1));
+}

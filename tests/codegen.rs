@@ -265,3 +265,16 @@ fn unimplemented_builtin_fails_at_codegen() {
     assert!(err.contains("itostr"), "unexpected error: {err}");
     assert!(err.contains("not implemented"), "unexpected error: {err}");
 }
+
+#[test]
+fn codegen_ops_carry_source_locations() {
+    let mut prog = ast::Program::parse("let x = 1;\nx + 2;").unwrap();
+    prog.source_name = "test.spcy".to_string();
+    ast::Program::typecheck(&mut prog).unwrap();
+    let context = codegen::new_context();
+    let module = codegen::lower(&prog, &context).unwrap();
+    let dump = module.dump();
+    // The `1` literal and the `x + 2` statement must carry real locations.
+    assert!(dump.contains("test.spcy:1:9"), "missing stmt-1 loc in:\n{dump}");
+    assert!(dump.contains("test.spcy:2:1"), "missing stmt-2 loc in:\n{dump}");
+}

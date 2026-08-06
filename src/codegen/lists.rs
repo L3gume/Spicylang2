@@ -134,10 +134,11 @@ pub(crate) fn integer_constant<'c, 'a>(
 pub(crate) fn empty_list<'c, 'a>(
     block: &'a Block<'c>,
     module: &Module<'c>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     let ptr = Type::parse(module.context, "!llvm.ptr")
         .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
-    let op = llvm::zero(ptr, Location::unknown(module.context));
+    let op = llvm::zero(ptr, location);
     block
         .append_operation(op)
         .result(0)
@@ -150,8 +151,8 @@ pub(crate) fn list_is_null<'c, 'a>(
     ptr: Value<'c, 'a>,
     block: &'a Block<'c>,
     module: &Module<'c>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let int_op = OperationBuilder::new("llvm.ptrtoint", location)
         .add_operands(&[ptr])
         .add_results(&[IntegerType::new(module.context, 64).into()])
@@ -178,8 +179,8 @@ pub(crate) fn build_cons<'c, 'a>(
     head_mono: &Monotype,
     block: &'a Block<'c>,
     module: &mut Module<'c>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let elem = lower_type(&default_free_vars(head_mono), module)?;
     let ptr = Type::parse(module.context, "!llvm.ptr")
         .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
@@ -238,11 +239,12 @@ pub(crate) fn lower_list<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let mut result = empty_list(block, module)?;
+    let mut result = empty_list(block, module, location)?;
     for e in exps.iter().rev() {
         let head = lower_expr(e, block, module, env)?;
-        result = build_cons(head, result, &e.typ, block, module)?;
+        result = build_cons(head, result, &e.typ, block, module, location)?;
     }
     Ok(result)
 }
@@ -254,8 +256,9 @@ pub(crate) fn lower_cons<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     let head_value = lower_expr(head, block, module, env)?;
     let tail_value = lower_expr(tail, block, module, env)?;
-    build_cons(head_value, tail_value, &head.typ, block, module)
+    build_cons(head_value, tail_value, &head.typ, block, module, location)
 }

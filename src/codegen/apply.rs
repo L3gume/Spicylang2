@@ -30,8 +30,9 @@ pub(crate) fn lower_let<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    if let Some(value) = lower_tail_recursive_let(name, e1, e2, block, module, env)? {
+    if let Some(value) = lower_tail_recursive_let(name, e1, e2, block, module, env, location)? {
         return Ok(value);
     }
     let previous = env.get(name).cloned();
@@ -58,6 +59,7 @@ fn lower_tail_recursive_let<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Option<Value<'c, 'a>>, String> {
     let (params, body) = peel_abstractions(function);
     if params.len() != 3 {
@@ -86,7 +88,6 @@ fn lower_tail_recursive_let<'c, 'a>(
         .map(|arg| lower_expr(arg, block, module, env))
         .collect::<Result<_, _>>()?;
     let types: Vec<Type<'c>> = initial.iter().map(|value| value.r#type()).collect();
-    let location = Location::unknown(module.context);
 
     let before_block = Block::new(&types.iter().map(|typ| (*typ, location)).collect::<Vec<_>>());
     let before_values: Vec<Value<'c, '_>> = (0..3)
@@ -280,15 +281,15 @@ fn reference_specialization<'c, 'a>(
     captures: &[(String, Type<'c>)],
     block: &'a Block<'c>,
     module: &mut Module<'c>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     if !captures.is_empty() {
         return Err(format!(
             "codegen: cannot use `{self_name}` (a closure with captures) as a value yet"
         ));
     }
-    let symbol = specialize_binding(sym, self_name, typ, captures, module)?;
+    let symbol = specialize_binding(sym, self_name, typ, captures, module, location)?;
     let func_type = specialization_function_type(sym, typ, captures, module)?;
-    let location = Location::unknown(module.context);
     block
         .append_operation(func::constant(
             module.context,
@@ -309,6 +310,7 @@ pub(crate) fn lower_variable<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     let ENode::Variable(name) = &*expr.e else {
         unreachable!()
@@ -320,7 +322,7 @@ pub(crate) fn lower_variable<'c, 'a>(
                 format!("codegen: `{sym}` is not a registered lambda binding")
             })?;
             let captures = lambda_captures(info, name, env);
-            return reference_specialization(sym, name, &expr.typ, &captures, block, module);
+            return reference_specialization(sym, name, &expr.typ, &captures, block, module, location);
         }
         None => {}
     }
@@ -338,15 +340,14 @@ pub(crate) fn lower_variable<'c, 'a>(
     if module.abstractions.contains_key(name) {
         let info = module.abstractions.get(name).unwrap();
         let captures = lambda_captures(info, name, env);
-        return reference_specialization(name, name, &expr.typ, &captures, block, module);
+        return reference_specialization(name, name, &expr.typ, &captures, block, module, location);
     }
 
     // A nullary enum constructor (`None`) builds a tagged value with no
     // payload.
     if let Some(&(_, variant_index, arity)) = module.constructors.get(name) {
         if arity == 0 {
-            let location = Location::unknown(module.context);
-            let payload = empty_list(block, module)?;
+            let payload = empty_list(block, module, location)?;
             return build_enum_value(module, block, variant_index, payload, location);
         }
     }
@@ -358,8 +359,6 @@ pub(crate) fn lower_variable<'c, 'a>(
             format!("codegen: undefined variable `{name}` (not a bound parameter or symbol)")
         }
     })?;
-
-    let location = Location::unknown(module.context);
 
     // A symbol that takes parameters is a builtin function value: reference it
     // with a `func.constant` so ordinary application can `call_indirect` it.
@@ -410,6 +409,7 @@ fn specialize_binding<'c>(
     typ: &Monotype,
     captures: &[(String, Type<'c>)],
     module: &mut Module<'c>,
+    location: Location<'c>,
 ) -> Result<String, String> {
     let info = module.abstractions.get(name).ok_or_else(|| {
         format!("codegen: `{name}` is not a registered lambda binding")
@@ -444,7 +444,6 @@ fn specialize_binding<'c>(
         .map(|m| lower_type(m, module))
         .collect::<Result<_, _>>()?;
     let ret_mlir = lower_type(&ret_mono, module)?;
-    let location = Location::unknown(module.context);
 
     // Captured variables are threaded as leading parameters, so the lifted
     // function is `@spec(captures..., params...) -> ret`.
@@ -497,8 +496,8 @@ pub(crate) fn lower_application<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
 
     // A single-argument constructor application `Some x`.
     if let ENode::Variable(name) = &*f.e {
@@ -546,6 +545,7 @@ pub(crate) fn lower_application<'c, 'a>(
                         block,
                         module,
                         env,
+                        location,
                     );
                 }
                 return lower_partial_application(
@@ -558,6 +558,7 @@ pub(crate) fn lower_application<'c, 'a>(
                     block,
                     module,
                     env,
+                    location,
                 );
             }
         }
@@ -615,10 +616,10 @@ fn lower_full_application<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let captures = lambda_captures(info, self_name, env);
-    let symbol = specialize_binding(sym, self_name, root_typ, &captures, module)?;
+    let symbol = specialize_binding(sym, self_name, root_typ, &captures, module, location)?;
 
     let (_, ret_mono) = concrete_func_parts(root_typ, params.len())?;
     let ret_mlir = lower_type(&ret_mono, module)?;
@@ -665,15 +666,15 @@ fn lower_partial_application<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    let location = Location::unknown(module.context);
     let captures = lambda_captures(info, self_name, env);
     if !captures.is_empty() {
         return Err(format!(
             "codegen: partial application of `{self_name}` (a closure with captures) is not supported yet"
         ));
     }
-    let full_symbol = specialize_binding(sym, self_name, root_typ, &captures, module)?;
+    let full_symbol = specialize_binding(sym, self_name, root_typ, &captures, module, location)?;
     let (param_monos, ret_mono) = concrete_func_parts(root_typ, params.len())?;
     let ret_mlir = lower_type(&ret_mono, module)?;
 
@@ -842,6 +843,7 @@ pub(crate) fn lower_abstraction<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &Env<'c, 'a>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     // Un-curry: `\x => \y => ... => body` becomes `(x, y, ...)` and the
     // innermost body.
@@ -877,12 +879,12 @@ pub(crate) fn lower_abstraction<'c, 'a>(
                     if let Some(info) = module.abstractions.get(sym) {
                         let concrete = default_free_vars(&info.abs_type);
                         let mlir_type = lower_type(&concrete, module)?;
-                        let ref_val = reference_specialization(sym, name, &concrete, &[], block, module)?;
+                        let ref_val = reference_specialization(sym, name, &concrete, &[], block, module, location)?;
                         captures.push((name.clone(), ref_val, mlir_type));
                     } else if let Some(info) = module.abstractions.get(name) {
                         let concrete = default_free_vars(&info.abs_type);
                         let mlir_type = lower_type(&concrete, module)?;
-                        let ref_val = reference_specialization(name, name, &concrete, &[], block, module)?;
+                        let ref_val = reference_specialization(name, name, &concrete, &[], block, module, location)?;
                         captures.push((name.clone(), ref_val, mlir_type));
                     } else {
                         return Err(format!(
@@ -896,7 +898,6 @@ pub(crate) fn lower_abstraction<'c, 'a>(
 
     let symbol = format!("closure_{}", module.closures);
     module.closures += 1;
-    let location = Location::unknown(module.context);
 
     if captures.is_empty() {
         let closure_block = Block::new(
@@ -1015,12 +1016,12 @@ pub(crate) fn lower_literal<'c, 'a>(
     lit: &Lit,
     block: &'a Block<'c>,
     module: &mut Module<'c>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     match lit {
         // Strings live in a module-level global and need several ops.
-        Lit::Str(value) => lower_string(value, block, module),
+        Lit::Str(value) => lower_string(value, block, module, location),
         _ => {
-            let location = Location::unknown(module.context);
             let operation = match lit {
                 Lit::Int(value) => arith::constant(
                     module.context,
@@ -1066,9 +1067,9 @@ fn lower_string<'c, 'a>(
     value: &str,
     block: &'a Block<'c>,
     module: &mut Module<'c>,
+    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     let context = module.context;
-    let location = Location::unknown(context);
 
     let symbol = format!("str_{}", module.strings);
     module.strings += 1;

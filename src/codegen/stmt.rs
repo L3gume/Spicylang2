@@ -26,13 +26,16 @@ use super::types::lower_type;
 /// node with no dialect mapping yet).
 pub fn lower<'a>(prog: &Program, context: &'a melior::Context) -> Result<Module<'a>, String> {
     let mut module = Module::new(context);
+    module.set_source_name(prog.source_name.clone());
     register_runtime_builtins(&mut module)?;
 
     let entry_block = Block::new(&[]);
     let mut last_value: Option<Value<'a, '_>> = None;
     let mut last_monotype: Option<Monotype> = None;
     for stmt in &prog.stmts {
-        match lower_stmt(stmt, &mut module, &entry_block)? {
+        match lower_stmt(stmt, &mut module, &entry_block)
+            .map_err(|e| with_stmt_pos(e, &stmt.pos, &prog.source_name))?
+        {
             Some(value) => {
                 last_value = Some(value);
                 last_monotype = if let SNode::Expr(e) = &*stmt.s {
@@ -71,6 +74,15 @@ pub fn lower<'a>(prog: &Program, context: &'a melior::Context) -> Result<Module<
 // ----------------------------------------------------------------------------
 // Statements
 // ----------------------------------------------------------------------------
+
+/// Prefix a codegen error with the source position of the statement being
+/// lowered, when known.
+fn with_stmt_pos(msg: String, pos: &crate::ast::Pos, source_name: &str) -> String {
+    if pos.is_nil() || source_name.is_empty() {
+        return msg;
+    }
+    format!("{source_name}:{}:{}: {}", pos.start_line, pos.start_col, msg)
+}
 
 fn lower_stmt<'a, 'b>(
     stmt: &Stmt,

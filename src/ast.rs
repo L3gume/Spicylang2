@@ -4,13 +4,82 @@ use crate::grammar;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pos {
-    start : (u32, u32),
-    end : (u32, u32)
+    /// 1-based source span. Filled by `Program::parse` from the byte offsets
+    /// that the grammar records; all-zero for synthetic/nil positions.
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    /// Raw byte offsets into the parsed buffer (the values the grammar's
+    /// `@L`/`@R` produce). Kept so positions can be re-indexed; unused by
+    /// codegen once the line/column span is filled.
+    pub start: u32,
+    pub end: u32,
 }
 
 impl Pos {
     pub fn nil() -> Pos {
-        Pos { start : (0, 0), end : (0, 0) }
+        Pos { start_line: 0, start_col: 0, end_line: 0, end_col: 0, start: 0, end: 0 }
+    }
+
+    /// A raw byte-offset span, as produced by the parser's `@L`/`@R`. The
+    /// line/column fields are filled in by [`Program::parse`].
+    pub fn bytes(start: u32, end: u32) -> Pos {
+        Pos { start_line: 0, start_col: 0, end_line: 0, end_col: 0, start, end }
+    }
+
+    pub fn is_nil(&self) -> bool {
+        self.start == 0 && self.end == 0
+    }
+
+    /// Convert the raw byte offsets into a 1-based (line, column) span using
+    /// the buffer's line index.
+    pub fn fill(&mut self, index: &LineIndex) {
+        let (sl, sc) = index.line_col(self.start);
+        let (el, ec) = index.line_col(self.end);
+        self.start_line = sl;
+        self.start_col = sc;
+        self.end_line = el;
+        self.end_col = ec;
+    }
+
+    /// The span covering both `self` and `other` (min start, max end),
+    /// re-filling the line/column fields for the combined byte range.
+    pub fn merge(&mut self, other: &Pos) {
+        self.start = self.start.min(other.start);
+        self.end = self.end.max(other.end);
+        self.start_line = 0;
+        self.start_col = 0;
+        self.end_line = 0;
+        self.end_col = 0;
+    }
+}
+
+/// A line index over a parsed buffer, used to convert byte offsets to
+/// 1-based (line, column) positions.
+#[derive(Debug, Clone)]
+pub struct LineIndex {
+    line_starts: Vec<u32>,
+}
+
+impl LineIndex {
+    pub fn new(buf: &str) -> LineIndex {
+        let mut line_starts = vec![0];
+        for (i, b) in buf.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i as u32 + 1);
+            }
+        }
+        LineIndex { line_starts }
+    }
+
+    /// 1-based (line, column) for a byte offset.
+    pub fn line_col(&self, offset: u32) -> (u32, u32) {
+        let line = match self.line_starts.binary_search(&offset) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        (line as u32 + 1, offset - self.line_starts[line] + 1)
     }
 }
 
@@ -56,7 +125,7 @@ pub enum SNode {
     TypeDecl(TypeHeader, Box<TypeDec>) // name <type vars> = <type>
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Stmt {
     pub s : Box<SNode>,
     pub ctx : TypeContext,
@@ -64,56 +133,71 @@ pub struct Stmt {
     // TODO
 }
 
+impl PartialEq for Stmt {
+    /// Structural equality: source positions are metadata and deliberately
+    /// excluded so parsed trees compare equal to hand-built expected trees.
+    fn eq(&self, other: &Self) -> bool {
+        self.s == other.s && self.ctx == other.ctx
+    }
+}
+
 impl Stmt {
     pub fn from(node : SNode) -> Stmt {
+        Self::at(Pos::nil(), node)
+    }
+
+    pub fn at(pos : Pos, node : SNode) -> Stmt {
         Stmt {
             s : Box::new(node),
             ctx : TypeContext::new(),
-            pos : Pos::nil()
+            pos
         }
     }
 
     pub fn typecheck(&mut self, ctx : &TypeContext) -> Result<(Substitution, Monotype), UnificationError> {
-        let mut context = ctx.clone();
-        let (combined, typ) = match &mut *self.s {
-            SNode::Decl(e1, t1, e2) => {
-                let var_name = match &*e1.e {
-                    ENode::Variable(name) => name.clone(),
-                    _ => return Err(UnificationError { message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
-                };
-                if TypeContext::is_builtin(&var_name) {
-                    return Err(UnificationError { message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
+        let result = (|| -> Result<(Substitution, Monotype), UnificationError> {
+            let mut context = ctx.clone();
+            let (combined, typ) = match &mut *self.s {
+                SNode::Decl(e1, t1, e2) => {
+                    let var_name = match &*e1.e {
+                        ENode::Variable(name) => name.clone(),
+                        _ => return Err(UnificationError { pos: None, message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
+                    };
+                    if TypeContext::is_builtin(&var_name) {
+                        return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
+                    }
+                    let binding_type = type_to_typefn(t1, &mut context)?;
+                    let old_binding = context.get(&var_name);
+                    context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
+                    let (s1, inferred_type) = algo_w(&mut context, e2)?;
+                    let s2 = unify(&binding_type.apply(&s1), &inferred_type)?;
+                    let combined = s1.combine(s2);
+                    context = context.apply(&combined);
+                    match old_binding {
+                        Some(poly) => context.add(var_name.clone(), poly),
+                        None => context.remove(&var_name),
+                    }
+                    let resolved_typ = binding_type.apply(&combined);
+                    let generalized = context.generalise(&resolved_typ);
+                    context.add(var_name, generalized);
+                    self.ctx = context;
+                    (combined, resolved_typ)
+                },
+                SNode::Expr(e1) => {
+                    let (sub, typ) = algo_w(&mut context, e1)?;
+                    self.ctx = context.apply(&sub);
+                    (sub, typ)
+                },
+                SNode::TypeDecl(header, dec) => {
+                    handle_type_decl(header, dec, &mut context)?;
+                    self.ctx = context;
+                    (Substitution::new(), Monotype::unit())
                 }
-                let binding_type = type_to_typefn(t1, &mut context)?;
-                let old_binding = context.get(&var_name);
-                context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
-                let (s1, inferred_type) = algo_w(&mut context, e2)?;
-                let s2 = unify(&binding_type.apply(&s1), &inferred_type)?;
-                let combined = s1.combine(s2);
-                context = context.apply(&combined);
-                match old_binding {
-                    Some(poly) => context.add(var_name.clone(), poly),
-                    None => context.remove(&var_name),
-                }
-                let resolved_typ = binding_type.apply(&combined);
-                let generalized = context.generalise(&resolved_typ);
-                context.add(var_name, generalized);
-                self.ctx = context;
-                (combined, resolved_typ)
-            },
-            SNode::Expr(e1) => {
-                let (sub, typ) = algo_w(&mut context, e1)?;
-                self.ctx = context.apply(&sub);
-                (sub, typ)
-            },
-            SNode::TypeDecl(header, dec) => {
-                handle_type_decl(header, dec, &mut context)?;
-                self.ctx = context;
-                (Substitution::new(), Monotype::unit())
-            }
-        };
-        resolve_stmt_types(self, &combined);
-        Ok((combined, typ))
+            };
+            resolve_stmt_types(self, &combined);
+            Ok((combined, typ))
+        })();
+        result.map_err(|e| e.with_pos(self.pos.clone()))
     }
 }
 
@@ -216,7 +300,7 @@ fn resolve_expr_types(expr : &mut Expr, sub : &Substitution) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Expr {
     pub e : Box<ENode>,
     pub ctx : TypeContext,
@@ -228,14 +312,99 @@ pub struct Expr {
     pub typ : Monotype,
 }
 
+impl PartialEq for Expr {
+    /// Structural equality; `pos` is metadata and deliberately excluded.
+    fn eq(&self, other: &Self) -> bool {
+        self.e == other.e && self.ctx == other.ctx && self.typ == other.typ
+    }
+}
+
 impl Expr {
     pub fn from(node : ENode) -> Expr {
+        Self::at(Pos::nil(), node)
+    }
+
+    pub fn at(pos : Pos, node : ENode) -> Expr {
         Expr {
             e : Box::new(node),
             ctx : TypeContext::new(),
-            pos : Pos::nil(),
+            pos,
             typ : Monotype::infer(),
         }
+    }
+}
+
+/// Fill every `Pos` reachable from `stmt` with line/column data derived from
+/// the buffer's line index (the grammar records raw byte offsets).
+pub fn fill_stmt_positions(stmt : &mut Stmt, index : &LineIndex) {
+    if !stmt.pos.is_nil() {
+        stmt.pos.fill(index);
+    }
+    match &mut *stmt.s {
+        SNode::Decl(e1, _, e2) => {
+            fill_expr_positions(e1, index);
+            fill_expr_positions(e2, index);
+        },
+        SNode::Expr(e1) => fill_expr_positions(e1, index),
+        SNode::TypeDecl(_, _) => {}
+    }
+}
+
+fn fill_expr_positions(expr : &mut Expr, index : &LineIndex) {
+    if !expr.pos.is_nil() {
+        expr.pos.fill(index);
+    }
+    match &mut *expr.e {
+        ENode::Variable(_) | ENode::Literal(_) => {}
+        ENode::Abstraction(_, body) => fill_expr_positions(body, index),
+        ENode::Application(f, x) => {
+            fill_expr_positions(f, index);
+            fill_expr_positions(x, index);
+        },
+        ENode::Let(_, e1, e2) => {
+            fill_expr_positions(e1, index);
+            fill_expr_positions(e2, index);
+        },
+        ENode::IfElse(c, t, e) => {
+            fill_expr_positions(c, index);
+            fill_expr_positions(t, index);
+            fill_expr_positions(e, index);
+        },
+        ENode::Block(stmts, e) => {
+            for s in stmts.iter_mut() {
+                fill_stmt_positions(s, index);
+            }
+            fill_expr_positions(e, index);
+        },
+        ENode::Comparison(_, a, b) => {
+            fill_expr_positions(a, index);
+            fill_expr_positions(b, index);
+        },
+        ENode::Arithmetic(_, a, b) => {
+            fill_expr_positions(a, index);
+            fill_expr_positions(b, index);
+        },
+        ENode::Logical(_, a, b) => {
+            fill_expr_positions(a, index);
+            fill_expr_positions(b, index);
+        },
+        ENode::Unary(_, e) => fill_expr_positions(e, index),
+        ENode::List(es) => {
+            for e in es.iter_mut() {
+                fill_expr_positions(e, index);
+            }
+        },
+        ENode::Cons(h, t) => {
+            fill_expr_positions(h, index);
+            fill_expr_positions(t, index);
+        },
+        ENode::Match(scrut, cases) => {
+            fill_expr_positions(scrut, index);
+            for c in cases.iter_mut() {
+                fill_expr_positions(&mut c.val, index);
+                fill_expr_positions(&mut c.exp, index);
+            }
+        },
     }
 }
 
@@ -280,12 +449,20 @@ pub enum UnaryOp {
 #[derive(Debug)]
 pub struct Program {
     pub stmts : Vec<Stmt>,
-    pub ctx : TypeContext
+    pub ctx : TypeContext,
+    /// The name of the source this program was parsed from (file path, or
+    /// `"<repl>"`), used when attaching locations to generated MLIR.
+    pub source_name : String
 }
 
 impl Program {
     pub fn parse(buf : &str) -> Result<Box<Program>, String> {
-        grammar::ProgParser::new().parse(buf).map_err(|e| format!("{}", e))
+        let mut program = grammar::ProgParser::new().parse(buf).map_err(|e| format!("{}", e))?;
+        let index = LineIndex::new(buf);
+        for stmt in program.stmts.iter_mut() {
+            fill_stmt_positions(stmt, &index);
+        }
+        Ok(program)
     }
 
     pub fn parse_with_prelude(buf : &str) -> Result<Box<Program>, String> {

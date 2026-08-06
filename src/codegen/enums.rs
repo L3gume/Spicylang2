@@ -50,7 +50,7 @@ pub(crate) fn build_payload<'c, 'a>(
     location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
     if fields.is_empty() {
-        return empty_list(block, module);
+        return empty_list(block, module, location);
     }
     let names: Vec<String> = fields.iter().map(|(_, t)| t.to_string()).collect();
     let payload_struct =

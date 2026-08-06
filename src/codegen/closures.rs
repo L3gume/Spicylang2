@@ -261,7 +261,7 @@ pub(crate) fn build_closure<'c, 'a>(
     store_field(module, block, closure, closure_struct, 0, fn_ptr, location)?;
 
     let env = if captures.is_empty() {
-        empty_list(block, module)?
+        empty_list(block, module, location)?
     } else {
         let env_struct = env_struct_type(module, captures)?;
         let env_ptr = malloc_call(module, block, 8 * captures.len() as i64, location)?;
