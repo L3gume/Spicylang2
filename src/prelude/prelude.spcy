@@ -123,7 +123,7 @@ let filter = \pred ls => match ls
 let contains = \val ls => match ls
     | [] => false
     | x::xs => (
-        if x == val then true else contains_val val xs
+        if x == val then true else contains val xs
     );
 
 # predicate-based contains
