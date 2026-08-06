@@ -1063,7 +1063,7 @@ pub(crate) fn lower_literal<'c, 'a>(
 
 /// Lower a string literal to a module-level `llvm.mlir.global` plus
 /// `llvm.mlir.addressof` and `llvm.getelementptr`, returning `!llvm.ptr`.
-fn lower_string<'c, 'a>(
+pub(crate) fn lower_string<'c, 'a>(
     value: &str,
     block: &'a Block<'c>,
     module: &mut Module<'c>,

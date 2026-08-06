@@ -1,7 +1,7 @@
 # call the function fn n times
 let for_n = \n fn =>
     let inner = (\idx =>
-        if idx < n then
+        if idx <= n then
         {
             let _ = fn idx;
             inner (idx + 1)
@@ -12,11 +12,11 @@ let for_n = \n fn =>
 # fizzbuzz impl
 let fizzbuzz = \n =>
     if (n % 15) == 0 then
-        print "fizzbuzz "
+        println "fizzbuzz"
     else if (n % 3) == 0 then
-        print "fizz "
+        println "fizz"
     else if (n % 5) == 0 then
-        print "buzz "
-    else ();
+        println "buzz"
+    else println (itostr n);
 
-for_n 30 fizzbuzz;
+for_n 100 fizzbuzz;

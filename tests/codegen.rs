@@ -270,9 +270,48 @@ fn print_requires_string_argument() {
 fn unimplemented_builtin_fails_at_codegen() {
     // Seeded in the type context (so it typechecks) but no runtime function is
     // emitted yet: the error should name the builtin.
-    let err = run("itostr 42;", false).unwrap_err();
-    assert!(err.contains("itostr"), "unexpected error: {err}");
+    let err = run(r#"strtoi "42";"#, false).unwrap_err();
+    assert!(err.contains("strtoi"), "unexpected error: {err}");
     assert!(err.contains("not implemented"), "unexpected error: {err}");
+}
+
+#[test]
+fn itostr_builtin_runs() {
+    // `itostr` formats an int into a heap string via `@sprintf`.
+    match run(r#"itostr 42;"#, false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "42"),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
+fn itostr_handles_negatives() {
+    match run(r#"let x = 0 - 42; itostr x;"#, false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "-42"),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
+fn ftostr_builtin_runs() {
+    // `ftostr` widens the float to f64 and formats it via `@sprintf`.
+    match run("ftostr 3.14;", false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "3.14"),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
+fn btostr_builtin_runs() {
+    // `btostr` selects between the static "true"/"false" globals.
+    match run("btostr true;", false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "true"),
+        other => panic!("expected String, got {other:?}"),
+    }
+    match run("btostr false;", false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "false"),
+        other => panic!("expected String, got {other:?}"),
+    }
 }
 
 #[test]

@@ -13,8 +13,9 @@ use melior::ir::{
 use std::collections::HashMap;
 
 use super::{AbstractionInfo, EnumLayout, Module};
-use super::apply::default_free_vars;
+use super::apply::{default_free_vars, lower_string};
 use super::expr::lower_expr;
+use super::lists::malloc_call;
 use super::types::lower_type;
 
 /// Lower a type-checked program to an MLIR module.
@@ -201,6 +202,26 @@ fn stub_builtin(name: &str, _signature: FunctionType<'_>) -> Result<(), String> 
     Err(format!("codegen: builtin `{name}` is not implemented yet"))
 }
 
+/// Append `llvm.ptrtoint %value : !llvm.ptr to i64` to `block`, matching the
+/// `i64` argument convention used for every external libc call.
+fn ptrtoint_i64<'a, 'b>(
+    module: &Module<'a>,
+    block: &'b Block<'a>,
+    value: Value<'a, 'b>,
+    location: Location<'a>,
+) -> Result<Value<'a, 'b>, String> {
+    let op = OperationBuilder::new("llvm.ptrtoint", location)
+        .add_operands(&[value])
+        .add_results(&[IntegerType::new(module.context, 64).into()])
+        .build()
+        .map_err(|e| e.to_string())?;
+    block
+        .append_operation(op)
+        .result(0)
+        .map_err(|e| e.to_string())
+        .map(Into::into)
+}
+
 // ----------------------------------------------------------------------------
 // Individual builtins
 // ----------------------------------------------------------------------------
@@ -325,22 +346,215 @@ fn emit_println<'a>(module: &mut Module<'a>) -> Result<(), String> {
     Ok(())
 }
 
-/// `itostr : int -> str`, i.e. `func.func @itostr(i32) -> !llvm.ptr`.
+/// `itostr : int -> str`, lowered as `func.func @itostr(i32) -> !llvm.ptr`.
+///
+/// The body formats the integer into a fresh heap buffer with `@sprintf`:
+///
+/// ```text
+/// @itostr(%arg0: i32) -> !llvm.ptr {
+///   %0 = arith.sitofp %arg0 : i32 to f64
+///   %1 = func.call @malloc(12) : (i64) -> i64
+///   %2 = llvm.inttoptr %1 : i64 to !llvm.ptr
+///   %fmt = llvm.mlir.addressof @str_N   // "%.0f"
+///   %3 = llvm.ptrtoint %2 : !llvm.ptr to i64
+///   %4 = llvm.ptrtoint %fmt : !llvm.ptr to i64
+///   %5 = func.call @sprintf(%3, %4, %0) : (i64, i64, f64) -> i32
+///   return %2 : !llvm.ptr
+/// }
+/// ```
+///
+/// The int is widened to `f64` so a single `@sprintf(i64, i64, f64)` declaration
+/// serves both `itostr` and `ftostr`; every `i32` is exact in a `f64`, and
+/// `"%.0f"` renders it without a decimal point.
 fn emit_itostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("itostr", FunctionType::new(module.context, &[t.int], &[t.string]))
+    let f64_type: Type = Type::float64(module.context);
+    let i32_type: Type = IntegerType::new(module.context, 32).into();
+
+    ensure_sprintf(module)?;
+
+    let block = Block::new(&[(t.int, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+
+    let sitofp = OperationBuilder::new("arith.sitofp", location)
+        .add_operands(&[arg])
+        .add_results(&[f64_type])
+        .build()
+        .map_err(|e| e.to_string())?;
+    let f64val: Value<'_, '_> = block
+        .append_operation(sitofp)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+
+    // `i32` needs at most 11 characters ("-2147483648") plus a trailing NUL.
+    let buf = malloc_call(module, &block, 12, location)?;
+
+    // The `"%.0f"` format string lives in a module-level global.
+    let fmt = lower_string("%.0f", &block, module, location)?;
+
+    let buf_i64 = ptrtoint_i64(module, &block, buf, location)?;
+    let fmt_i64 = ptrtoint_i64(module, &block, fmt, location)?;
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "sprintf"),
+        &[buf_i64, fmt_i64, f64val],
+        &[i32_type],
+        location,
+    );
+    block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?;
+    block.append_operation(func::r#return(&[buf], location));
+
+    let function_type = FunctionType::new(module.context, &[t.int], &[t.string]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "itostr"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("itostr".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
 }
 
-/// `ftostr : float -> str`, i.e. `func.func @ftostr(f32) -> !llvm.ptr`.
+/// `ftostr : float -> str`, lowered as `func.func @ftostr(f32) -> !llvm.ptr`.
+///
+/// The float is widened to `f64` before the call: C variadic promotion passes
+/// `float` as `double`, so `@sprintf` must receive a `f64` to read back the
+/// right value. The body then formats it into a fresh heap buffer:
+///
+/// ```text
+/// @ftostr(%arg0: f32) -> !llvm.ptr {
+///   %0 = arith.extf %arg0 : f32 to f64
+///   %1 = func.call @malloc(32) : (i64) -> i64
+///   %2 = llvm.inttoptr %1 : i64 to !llvm.ptr
+///   %fmt = llvm.mlir.addressof @str_N   // "%.7g"
+///   %3 = llvm.ptrtoint %2 : !llvm.ptr to i64
+///   %4 = llvm.ptrtoint %fmt : !llvm.ptr to i64
+///   %5 = func.call @sprintf(%3, %4, %0) : (i64, i64, f64) -> i32
+///   return %2 : !llvm.ptr
+/// }
+/// ```
+///
+/// `%.7g` renders the full precision of an `f32` (7 significant digits) while
+/// trimming trailing zeros, e.g. `3.14`.
 fn emit_ftostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("ftostr", FunctionType::new(module.context, &[t.float], &[t.string]))
+    let f64_type: Type = Type::float64(module.context);
+    let i32_type: Type = IntegerType::new(module.context, 32).into();
+
+    ensure_sprintf(module)?;
+
+    let block = Block::new(&[(t.float, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+
+    let extf = OperationBuilder::new("arith.extf", location)
+        .add_operands(&[arg])
+        .add_results(&[f64_type])
+        .build()
+        .map_err(|e| e.to_string())?;
+    let f64val: Value<'_, '_> = block
+        .append_operation(extf)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+
+    // 32 bytes comfortably fits any `%.7g` rendering of an `f32`-range value.
+    let buf = malloc_call(module, &block, 32, location)?;
+
+    // The `"%.7g"` format string lives in a module-level global.
+    let fmt = lower_string("%.7g", &block, module, location)?;
+
+    let buf_i64 = ptrtoint_i64(module, &block, buf, location)?;
+    let fmt_i64 = ptrtoint_i64(module, &block, fmt, location)?;
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "sprintf"),
+        &[buf_i64, fmt_i64, f64val],
+        &[i32_type],
+        location,
+    );
+    block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?;
+    block.append_operation(func::r#return(&[buf], location));
+
+    let function_type = FunctionType::new(module.context, &[t.float], &[t.string]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "ftostr"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("ftostr".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
 }
 
-/// `btostr : bool -> str`, i.e. `func.func @btostr(i1) -> !llvm.ptr`.
+/// `btostr : bool -> str`, lowered as `func.func @btostr(i1) -> !llvm.ptr`.
+///
+/// Returns one of two static string globals selected on the argument — no heap
+/// allocation, so nothing is owned or leaked:
+///
+/// ```text
+/// @btostr(%arg0: i1) -> !llvm.ptr {
+///   %t = llvm.mlir.addressof @str_N   // "true"
+///   %f = llvm.mlir.addressof @str_M   // "false"
+///   %0 = arith.select %arg0, %t, %f : i1, !llvm.ptr
+///   return %0 : !llvm.ptr
+/// }
+/// ```
 fn emit_btostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("btostr", FunctionType::new(module.context, &[t.bool], &[t.string]))
+
+    let block = Block::new(&[(t.bool, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+
+    let true_str = lower_string("true", &block, module, location)?;
+    let false_str = lower_string("false", &block, module, location)?;
+    let select = arith::select(arg, true_str, false_str, location);
+    let result: Value<'_, '_> = block
+        .append_operation(select)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &[t.bool], &[t.string]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "btostr"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("btostr".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
 }
 
 /// `strtoi : str -> int`, i.e. `func.func @strtoi(!llvm.ptr) -> i32`.
@@ -439,6 +653,45 @@ fn ensure_puts<'a>(module: &mut Module<'a>) -> Result<(), String> {
     );
     module.module.body().append_operation(function);
     module.puts_declared = true;
+    Ok(())
+}
+
+/// Emit the external declaration `func.func @sprintf(i64, i64, f64) -> i32`
+/// once.
+///
+/// `sprintf` formats the numeric argument into the heap buffer that `itostr`
+/// and `ftostr` return. The buffer and format-string pointers are passed as
+/// `i64` (via `llvm.ptrtoint`), and the value is always passed as `f64` — the
+/// type C's variadic promotion produces for floats, so a single declaration
+/// serves both builtins. Only built-in types are used so the `func_to_llvm`
+/// pass converts it cleanly.
+fn ensure_sprintf<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    if module.sprintf_declared {
+        return Ok(());
+    }
+    let location = Location::unknown(module.context);
+    let function_type = FunctionType::new(
+        module.context,
+        &[
+            IntegerType::new(module.context, 64).into(),
+            IntegerType::new(module.context, 64).into(),
+            Type::float64(module.context),
+        ],
+        &[IntegerType::new(module.context, 32).into()],
+    );
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "sprintf"),
+        TypeAttribute::new(function_type.into()),
+        Region::new(),
+        &[(
+            Identifier::new(module.context, "sym_visibility"),
+            StringAttribute::new(module.context, "private").into(),
+        )],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.sprintf_declared = true;
     Ok(())
 }
 
