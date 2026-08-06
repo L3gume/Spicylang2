@@ -4,10 +4,12 @@
 # UTILITY TYPES & FUNCTIONS
 #
 
+# Option type
 enum Option('a) =
     Some('a)
     | None;
 
+# Result type for result pattern
 enum Result('a, 'err)=
     Ok('a)
     | Err('err);
@@ -21,20 +23,24 @@ let get_or_else = \opt default => match opt
 let odd = \(i : int) => match i % 2
     | 0 => false
     | _ => true;
+
 let even = \(i : int) => !(odd i);
 
 #
 # LISTS AND ITERATION
 #
 
+# first element
 let head = \ls => match ls
     | [] => None
     | x::xs => Some x;
 
+# list tail (Option)
 let tail = \ls => match ls
     | [] => None
     | x::xs => Some xs;
 
+# last element
 let last = \ls =>
     let aux = (\ls elem => match ls
         | [] => elem
@@ -43,10 +49,12 @@ let last = \ls =>
     | [] => None
     | x::xs => Some (aux xs x);
 
+# get at index
 let get_i = \idx ls => match ls
     | [] => None
     | x::xs => (if idx == 0 then Some x else get_i (idx - 1) xs);
 
+# list length
 let len = \ls =>
     let aux = (\ls ctr => match ls
         | [] => ctr
@@ -62,10 +70,29 @@ let iter = \fn ls => match ls
         iter fn xs
     };
 
+# iterate with index
+let iter_i = \fn ls =>
+    let aux = (\fn idx ls => match ls
+    | [] => ()
+    | x::xs => {
+        fn idx x;
+        aux fn (idx + 1) xs
+    })
+    in
+    aux fn 0 ls;
+
 # map elements of list to another list
 let map = \fn ls => match ls
     | [] => []
     | x::xs => (fn x)::(map fn xs);
+
+# map with index
+let map_i = \fn ls =>
+    let aux = (\fn idx ls => match ls
+    | [] => []
+    | x :: xs => (fn idx x)::(aux fn (idx + 1) xs))
+    in
+    aux fn 0 ls;
 
 # left fold
 let lfold = \fn acc ls => match ls
@@ -92,6 +119,23 @@ let filter = \pred ls => match ls
             filter pred xs
     );
 
+# value-based contains
+let contains = \val ls => match ls
+    | [] => false
+    | x::xs => (
+        if x == val then true else contains_val val xs
+    );
+
+# predicate-based contains
+let any = \pred ls => match ls
+    | [] => false
+    | x::xs => (pred x) || (any pred xs);
+
+# predicate-based ALL
+let all = \pred ls => match ls
+    | [] => true
+    | x::xs => (pred x) && (all pred xs);
+
 # tail-recursive filter
 let tfilter = \pred ls =>
     let aux = (\acc ls => match ls
@@ -107,3 +151,5 @@ let append = \ls1 ls2 =>
     | x::xs => aux (x::acc) xs)
     in
     aux ls2 (rev ls1);
+
+# TODO: zip, needs n-tuple support for elegant impl

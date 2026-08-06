@@ -18,13 +18,10 @@
     - [x] Support comments
 - [ ] Pretty-printing of type and AST nodes
     - [x] abstract type variables in types => 'a, 'b, etc. instead of txx
+    - [ ] Display impl for everything in AST
 - [x] User-defined enumeration types
-- [ ] User-defined structure types
 - [x] Pattern Matching on expressions
 - [x] Builtin type to string conversions for print
-    - support escape characters like '\n'
-    - OCaml does str_of_xx for this, just applying 'str' to value is fine, type checker will simply return str type
-    - Code gen will handle generating conversion code
 - [x] Builtin List stuff
     - [x] builtin cons and list expressions
     - [x] len
@@ -32,6 +29,14 @@
     - [x] last
     - [x] indexing (?) -- added some sort of indexing
     - [x] append
-- [ ] n-tuple type
-- [ ] tail call optimization
-- [ ] get rid of REPL, more trouble than worth
+- [ ] new types
+    - [ ] escape sequences in strings
+    - [ ] char
+    - [ ] User-defined structure types
+    - [ ] n-tuple type
+- [ ] get rid of REPL, more trouble than worth (or make it useable?)
+- [ ] optimizations
+    - [ ] tail call optimization
+    - [ ] bool short-circuiting
+- [ ] lifetime analysis for memory mgmt with refs like in Rust
+- [ ] str format builtin
