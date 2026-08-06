@@ -2,7 +2,8 @@
 
 use crate::ast::*;
 use crate::types::{Monotype, TypeFunc};
-use melior::dialect::{arith, func};
+use melior::dialect::llvm::LoadStoreOptions;
+use melior::dialect::{arith, func, llvm};
 use melior::ir::{
     Attribute,
     attribute::{FlatSymbolRefAttribute, IntegerAttribute, StringAttribute, TypeAttribute},
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 use super::{AbstractionInfo, EnumLayout, Module};
 use super::apply::{default_free_vars, lower_string};
 use super::expr::lower_expr;
-use super::lists::malloc_call;
+use super::lists::{integer_constant, malloc_call};
 use super::types::lower_type;
 
 /// Lower a type-checked program to an MLIR module.
@@ -126,8 +127,10 @@ fn lower_expr_stmt<'a, 'b>(
 /// are still stubs that report "not implemented yet", so a use site fails in
 /// `lower_variable` with a clear error until each gets a body here.
 pub(crate) fn register_runtime_builtins<'a>(module: &mut Module<'a>) -> Result<(), String> {
-    ensure_printf(module)?;
-    ensure_puts(module)?;
+    let i32_type: Type = IntegerType::new(module.context, 32).into();
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
+    ensure_extern(module, "printf", &[i64_type], &[i32_type])?;
+    ensure_extern(module, "puts", &[i64_type], &[i32_type])?;
 
     // `register_builtin` runs every emitter: implemented ones emit their
     // `func.func` and register a symbol, while stubs report the
@@ -189,19 +192,6 @@ impl<'a> BuiltinTypes<'a> {
     }
 }
 
-/// Stub for a builtin whose body has not been written yet.
-///
-/// `signature` is the intended `func.func` type, spelled out at each call
-/// site.
-///
-/// TODO(body): emit the entry block and body, append `func.return`, register
-/// `signature` in [`Module::symbols`], and return `Ok(())` instead. Until
-/// then, the builtin stays out of `symbols`, so a use site fails in
-/// `lower_variable` with this "not implemented yet" error.
-fn stub_builtin(name: &str, _signature: FunctionType<'_>) -> Result<(), String> {
-    Err(format!("codegen: builtin `{name}` is not implemented yet"))
-}
-
 /// Append `llvm.ptrtoint %value : !llvm.ptr to i64` to `block`, matching the
 /// `i64` argument convention used for every external libc call.
 fn ptrtoint_i64<'a, 'b>(
@@ -213,6 +203,28 @@ fn ptrtoint_i64<'a, 'b>(
     let op = OperationBuilder::new("llvm.ptrtoint", location)
         .add_operands(&[value])
         .add_results(&[IntegerType::new(module.context, 64).into()])
+        .build()
+        .map_err(|e| e.to_string())?;
+    block
+        .append_operation(op)
+        .result(0)
+        .map_err(|e| e.to_string())
+        .map(Into::into)
+}
+
+/// Append `llvm.inttoptr %value : i64 to !llvm.ptr` to `block`, converting a
+/// byte address (e.g. `buf + offset`) back into a pointer for a store.
+fn inttoptr_ptr<'a, 'b>(
+    module: &Module<'a>,
+    block: &'b Block<'a>,
+    value: Value<'a, 'b>,
+    location: Location<'a>,
+) -> Result<Value<'a, 'b>, String> {
+    let ptr = Type::parse(module.context, "!llvm.ptr")
+        .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string())?;
+    let op = OperationBuilder::new("llvm.inttoptr", location)
+        .add_operands(&[value])
+        .add_results(&[ptr])
         .build()
         .map_err(|e| e.to_string())?;
     block
@@ -369,10 +381,11 @@ fn emit_println<'a>(module: &mut Module<'a>) -> Result<(), String> {
 fn emit_itostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
     let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
     let f64_type: Type = Type::float64(module.context);
     let i32_type: Type = IntegerType::new(module.context, 32).into();
 
-    ensure_sprintf(module)?;
+    ensure_extern(module, "sprintf", &[i64_type, i64_type, f64_type], &[i32_type])?;
 
     let block = Block::new(&[(t.int, location)]);
     let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
@@ -451,10 +464,11 @@ fn emit_itostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
 fn emit_ftostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
     let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
     let f64_type: Type = Type::float64(module.context);
     let i32_type: Type = IntegerType::new(module.context, 32).into();
 
-    ensure_sprintf(module)?;
+    ensure_extern(module, "sprintf", &[i64_type, i64_type, f64_type], &[i32_type])?;
 
     let block = Block::new(&[(t.float, location)]);
     let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
@@ -557,92 +571,406 @@ fn emit_btostr<'a>(module: &mut Module<'a>) -> Result<(), String> {
     Ok(())
 }
 
-/// `strtoi : str -> int`, i.e. `func.func @strtoi(!llvm.ptr) -> i32`.
+/// `strtoi : str -> int`, lowered as `func.func @strtoi(!llvm.ptr) -> i32`.
+///
+/// Parses a decimal string with `@atoi`. The C function has no error signal —
+/// `atoi` returns `0` when no conversion happens — so malformed input yields
+/// `0` rather than an error.
 fn emit_strtoi<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("strtoi", FunctionType::new(module.context, &[t.string], &[t.int]))
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
+    let i32_type: Type = IntegerType::new(module.context, 32).into();
+
+    ensure_extern(module, "atoi", &[i64_type], &[i32_type])?;
+
+    let block = Block::new(&[(t.string, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+    let arg_i64 = ptrtoint_i64(module, &block, arg, location)?;
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "atoi"),
+        &[arg_i64],
+        &[i32_type],
+        location,
+    );
+    let result: Value<'_, '_> = block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &[t.string], &[t.int]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "strtoi"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("strtoi".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
 }
 
-/// `strtof : str -> float`, i.e. `func.func @strtof(!llvm.ptr) -> f32`.
+/// `strtof : str -> float`, lowered as `func.func @strtof(!llvm.ptr) -> f32`.
+///
+/// Parses with `@atof` (which returns a double) and narrows to `f32`. The C
+/// function `strtof` shares the builtin's symbol name, so `atof` avoids a
+/// collision with the language builtin.
 fn emit_strtof<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("strtof", FunctionType::new(module.context, &[t.string], &[t.float]))
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
+    let f64_type: Type = Type::float64(module.context);
+
+    ensure_extern(module, "atof", &[i64_type], &[f64_type])?;
+
+    let block = Block::new(&[(t.string, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+    let arg_i64 = ptrtoint_i64(module, &block, arg, location)?;
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "atof"),
+        &[arg_i64],
+        &[f64_type],
+        location,
+    );
+    let d: Value<'_, '_> = block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    let truncf = OperationBuilder::new("arith.truncf", location)
+        .add_operands(&[d])
+        .add_results(&[t.float])
+        .build()
+        .map_err(|e| e.to_string())?;
+    let result: Value<'_, '_> = block
+        .append_operation(truncf)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &[t.string], &[t.float]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "strtof"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("strtof".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
 }
 
-/// `strtob : str -> bool`, i.e. `func.func @strtob(!llvm.ptr) -> i1`.
+/// `strtob : str -> bool`, lowered as `func.func @strtob(!llvm.ptr) -> i1`.
+///
+/// `true` iff the string equals `"true"` (case-sensitive), compared with
+/// `@strcmp`.
 fn emit_strtob<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("strtob", FunctionType::new(module.context, &[t.string], &[t.bool]))
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
+    let i32_type: Type = IntegerType::new(module.context, 32).into();
+
+    ensure_extern(module, "strcmp", &[i64_type, i64_type], &[i32_type])?;
+
+    let block = Block::new(&[(t.string, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+    let arg_i64 = ptrtoint_i64(module, &block, arg, location)?;
+    let true_str = lower_string("true", &block, module, location)?;
+    let true_i64 = ptrtoint_i64(module, &block, true_str, location)?;
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "strcmp"),
+        &[arg_i64, true_i64],
+        &[i32_type],
+        location,
+    );
+    let cmp: Value<'_, '_> = block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    let zero = arith::constant(
+        module.context,
+        IntegerAttribute::new(IntegerType::new(module.context, 32).into(), 0).into(),
+        location,
+    );
+    let zero_v: Value<'_, '_> = block
+        .append_operation(zero)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    let eq = arith::cmpi(module.context, arith::CmpiPredicate::Eq, cmp, zero_v, location);
+    let result: Value<'_, '_> = block
+        .append_operation(eq)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &[t.string], &[t.bool]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "strtob"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("strtob".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
 }
 
-/// `itof : int -> float`, i.e. `func.func @itof(i32) -> f32`.
+/// `itof : int -> float`, lowered as `func.func @itof(i32) -> f32`.
+///
+/// Widens with `arith.sitofp`; no libc call needed.
 fn emit_itof<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("itof", FunctionType::new(module.context, &[t.int], &[t.float]))
+
+    let block = Block::new(&[(t.int, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+    let sitofp = OperationBuilder::new("arith.sitofp", location)
+        .add_operands(&[arg])
+        .add_results(&[t.float])
+        .build()
+        .map_err(|e| e.to_string())?;
+    let result: Value<'_, '_> = block
+        .append_operation(sitofp)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &[t.int], &[t.float]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "itof"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("itof".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
 }
 
-/// `ftoi : float -> int`, i.e. `func.func @ftoi(f32) -> i32`.
+/// `ftoi : float -> int`, lowered as `func.func @ftoi(f32) -> i32`.
+///
+/// Narrows with `arith.fptosi`, truncating toward zero; no libc call needed.
 fn emit_ftoi<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("ftoi", FunctionType::new(module.context, &[t.float], &[t.int]))
+
+    let block = Block::new(&[(t.float, location)]);
+    let arg: Value<'_, '_> = block.argument(0).map_err(|e| e.to_string())?.into();
+    let fptosi = OperationBuilder::new("arith.fptosi", location)
+        .add_operands(&[arg])
+        .add_results(&[t.int])
+        .build()
+        .map_err(|e| e.to_string())?;
+    let result: Value<'_, '_> = block
+        .append_operation(fptosi)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(func::r#return(&[result], location));
+
+    let function_type = FunctionType::new(module.context, &[t.float], &[t.int]);
+    let region = Region::new();
+    region.append_block(block);
+
+    let function = func::func(
+        module.context,
+        StringAttribute::new(module.context, "ftoi"),
+        TypeAttribute::new(function_type.into()),
+        region,
+        &[],
+        location,
+    );
+    module.module.body().append_operation(function);
+    module.symbols.insert("ftoi".to_string(), function_type);
+    module.functions += 1;
+    Ok(())
 }
 
-/// `readin : unit -> str`, i.e. `func.func @readin(i32) -> !llvm.ptr`.
+/// `readin : unit -> str`, lowered as `func.func @readin(i32) -> !llvm.ptr`.
 ///
-/// TODO(body): read a line from stdin; the `unit` argument is the `i32`
-/// stand-in.
+/// Reads one line from stdin into a fresh heap buffer via POSIX `read`, then
+/// strips the trailing newline with `strcspn`. The `unit` argument is the
+/// `i32` stand-in (applications need an argument).
+///
+/// ```text
+/// @readin(%arg0: i32) -> !llvm.ptr {
+///   %buf = func.call @malloc(1024)          // 1 KiB line buffer
+///   %n   = func.call @read(0, %buf, 1023)   // cap below buffer size
+///   %n   = max(%n, 0)                       // errors/EOF read nothing
+///   buf[%n] = 0                             // NUL-terminate
+///   %end = func.call @strcspn(%buf, "\n")
+///   buf[%end] = 0                           // drop the newline
+///   return %buf
+/// }
+/// ```
 fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
+    let location = Location::unknown(module.context);
     let t = BuiltinTypes::new(module)?;
-    stub_builtin("readin", FunctionType::new(module.context, &[t.unit], &[t.string]))
-}
+    let i8_type: Type = IntegerType::new(module.context, 8).into();
+    let i32_type: Type = IntegerType::new(module.context, 32).into();
+    let i64_type: Type = IntegerType::new(module.context, 64).into();
 
-/// Emit the external declaration `func.func @printf(i64) -> i32` once.
-/// Uses `func.func` with only built-in types so the `func_to_llvm` pass
-/// can convert it cleanly.
-fn ensure_printf<'a>(module: &mut Module<'a>) -> Result<(), String> {
-    if module.printf_declared {
-        return Ok(());
-    }
-    let location = Location::unknown(module.context);
-    let function_type = FunctionType::new(
+    ensure_extern(module, "read", &[i32_type, i64_type, i64_type], &[i64_type])?;
+    ensure_extern(module, "strcspn", &[i64_type, i64_type], &[i64_type])?;
+
+    let block = Block::new(&[(t.unit, location)]);
+
+    let buf = malloc_call(module, &block, 1024, location)?;
+    let buf_i64 = ptrtoint_i64(module, &block, buf, location)?;
+
+    let fd = integer_constant(module, &block, 32, 0, location)?;
+    let count = integer_constant(module, &block, 64, 1023, location)?;
+    let call = func::call(
         module.context,
-        &[IntegerType::new(module.context, 64).into()],
-        &[IntegerType::new(module.context, 32).into()],
+        FlatSymbolRefAttribute::new(module.context, "read"),
+        &[fd, buf_i64, count],
+        &[i64_type],
+        location,
     );
+    let n: Value<'_, '_> = block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+
+    // Clamp to >= 0 so an error (-1) still NUL-terminates within the buffer.
+    let zero64 = integer_constant(module, &block, 64, 0, location)?;
+    let maxsi = arith::maxsi(n, zero64, location);
+    let n: Value<'_, '_> = block
+        .append_operation(maxsi)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+
+    let n_addr = arith::addi(buf_i64, n, location);
+    let n_addr: Value<'_, '_> = block
+        .append_operation(n_addr)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    let n_ptr = inttoptr_ptr(module, &block, n_addr, location)?;
+    let zero_i8 = arith::constant(
+        module.context,
+        IntegerAttribute::new(i8_type, 0).into(),
+        location,
+    );
+    let zero_i8: Value<'_, '_> = block
+        .append_operation(zero_i8)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    block.append_operation(llvm::store(
+        module.context,
+        zero_i8,
+        n_ptr,
+        location,
+        LoadStoreOptions::new(),
+    ));
+
+    let nl = lower_string("\n", &block, module, location)?;
+    let nl_i64 = ptrtoint_i64(module, &block, nl, location)?;
+    let call = func::call(
+        module.context,
+        FlatSymbolRefAttribute::new(module.context, "strcspn"),
+        &[buf_i64, nl_i64],
+        &[i64_type],
+        location,
+    );
+    let end: Value<'_, '_> = block
+        .append_operation(call)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+
+    let end_addr = arith::addi(buf_i64, end, location);
+    let end_addr: Value<'_, '_> = block
+        .append_operation(end_addr)
+        .result(0)
+        .map_err(|e| e.to_string())?
+        .into();
+    let end_ptr = inttoptr_ptr(module, &block, end_addr, location)?;
+    block.append_operation(llvm::store(
+        module.context,
+        zero_i8,
+        end_ptr,
+        location,
+        LoadStoreOptions::new(),
+    ));
+
+    block.append_operation(func::r#return(&[buf], location));
+
+    let function_type = FunctionType::new(module.context, &[t.unit], &[t.string]);
+    let region = Region::new();
+    region.append_block(block);
+
     let function = func::func(
         module.context,
-        StringAttribute::new(module.context, "printf"),
+        StringAttribute::new(module.context, "readin"),
         TypeAttribute::new(function_type.into()),
-        Region::new(),
-        &[(
-            Identifier::new(module.context, "sym_visibility"),
-            StringAttribute::new(module.context, "private").into(),
-        )],
+        region,
+        &[],
         location,
     );
     module.module.body().append_operation(function);
-    module.printf_declared = true;
+    module.symbols.insert("readin".to_string(), function_type);
+    module.functions += 1;
     Ok(())
 }
 
-/// Emit the external declaration `func.func @puts(i64) -> i32` once.
+/// Emit the external declaration `func.func @name(inputs) -> results` once.
 ///
-/// `puts` is the C-library "print string, then newline" function backing the
-/// `println` builtin. Like `printf`, it is declared with only built-in types
-/// so the `func_to_llvm` pass can convert it cleanly.
-fn ensure_puts<'a>(module: &mut Module<'a>) -> Result<(), String> {
-    if module.puts_declared {
+/// Externs are the C-library functions behind the builtins (`printf`, `puts`,
+/// `sprintf`, `atoi`, ...). Each is declared at most once per module, marked
+/// `private`, and uses only built-in types so the `func_to_llvm` pass converts
+/// it cleanly. Pointer arguments are passed as `i64` (via `llvm.ptrtoint`).
+fn ensure_extern<'a>(
+    module: &mut Module<'a>,
+    name: &str,
+    inputs: &[Type<'a>],
+    results: &[Type<'a>],
+) -> Result<(), String> {
+    if module.externs.contains(name) {
         return Ok(());
     }
     let location = Location::unknown(module.context);
-    let function_type = FunctionType::new(
-        module.context,
-        &[IntegerType::new(module.context, 64).into()],
-        &[IntegerType::new(module.context, 32).into()],
-    );
+    let function_type = FunctionType::new(module.context, inputs, results);
     let function = func::func(
         module.context,
-        StringAttribute::new(module.context, "puts"),
+        StringAttribute::new(module.context, name),
         TypeAttribute::new(function_type.into()),
         Region::new(),
         &[(
@@ -652,46 +980,7 @@ fn ensure_puts<'a>(module: &mut Module<'a>) -> Result<(), String> {
         location,
     );
     module.module.body().append_operation(function);
-    module.puts_declared = true;
-    Ok(())
-}
-
-/// Emit the external declaration `func.func @sprintf(i64, i64, f64) -> i32`
-/// once.
-///
-/// `sprintf` formats the numeric argument into the heap buffer that `itostr`
-/// and `ftostr` return. The buffer and format-string pointers are passed as
-/// `i64` (via `llvm.ptrtoint`), and the value is always passed as `f64` — the
-/// type C's variadic promotion produces for floats, so a single declaration
-/// serves both builtins. Only built-in types are used so the `func_to_llvm`
-/// pass converts it cleanly.
-fn ensure_sprintf<'a>(module: &mut Module<'a>) -> Result<(), String> {
-    if module.sprintf_declared {
-        return Ok(());
-    }
-    let location = Location::unknown(module.context);
-    let function_type = FunctionType::new(
-        module.context,
-        &[
-            IntegerType::new(module.context, 64).into(),
-            IntegerType::new(module.context, 64).into(),
-            Type::float64(module.context),
-        ],
-        &[IntegerType::new(module.context, 32).into()],
-    );
-    let function = func::func(
-        module.context,
-        StringAttribute::new(module.context, "sprintf"),
-        TypeAttribute::new(function_type.into()),
-        Region::new(),
-        &[(
-            Identifier::new(module.context, "sym_visibility"),
-            StringAttribute::new(module.context, "private").into(),
-        )],
-        location,
-    );
-    module.module.body().append_operation(function);
-    module.sprintf_declared = true;
+    module.externs.insert(name.to_string());
     Ok(())
 }
 

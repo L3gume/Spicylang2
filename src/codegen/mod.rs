@@ -32,7 +32,7 @@ use melior::ir::{
     r#type::FunctionType,
     Location, Value,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A binding in the current expression scope.
 #[derive(Clone)]
@@ -114,14 +114,11 @@ pub struct Module<'a> {
     aliases: HashMap<String, Monotype>,
     /// Number of string globals emitted, for unique symbol names.
     strings: usize,
-    /// Whether the external `printf` declaration has been emitted.
-    printf_declared: bool,
-    /// Whether the external `puts` declaration has been emitted.
-    puts_declared: bool,
-    /// Whether the external `sprintf` declaration has been emitted.
-    sprintf_declared: bool,
     /// Whether the external `malloc` declaration has been emitted.
     malloc_declared: bool,
+    /// Names of the external libc `func.func` declarations already emitted, so
+    /// each is declared at most once per module.
+    externs: HashSet<String>,
     /// Types of the top-level `func.func` symbols, keyed by name; a
     /// `Variable` that is not a bound parameter lowers to `func.call` on it.
     symbols: HashMap<String, FunctionType<'a>>,
@@ -161,10 +158,8 @@ impl<'a> Module<'a> {
             enums: HashMap::new(),
             aliases: HashMap::new(),
             strings: 0,
-            printf_declared: false,
-            puts_declared: false,
-            sprintf_declared: false,
             malloc_declared: false,
+            externs: HashSet::new(),
             symbols: HashMap::new(),
             closures: 0,
             abstractions: HashMap::new(),

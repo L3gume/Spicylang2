@@ -19,4 +19,9 @@ let fizzbuzz = \n =>
         println "buzz"
     else println (itostr n);
 
-for_n 100 fizzbuzz;
+let n = {
+        println "How many iterations?";
+        strtoi (readin ())
+    };
+
+for_n n fizzbuzz;

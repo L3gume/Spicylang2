@@ -267,15 +267,6 @@ fn print_requires_string_argument() {
 }
 
 #[test]
-fn unimplemented_builtin_fails_at_codegen() {
-    // Seeded in the type context (so it typechecks) but no runtime function is
-    // emitted yet: the error should name the builtin.
-    let err = run(r#"strtoi "42";"#, false).unwrap_err();
-    assert!(err.contains("strtoi"), "unexpected error: {err}");
-    assert!(err.contains("not implemented"), "unexpected error: {err}");
-}
-
-#[test]
 fn itostr_builtin_runs() {
     // `itostr` formats an int into a heap string via `@sprintf`.
     match run(r#"itostr 42;"#, false) {
@@ -312,6 +303,61 @@ fn btostr_builtin_runs() {
         Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "false"),
         other => panic!("expected String, got {other:?}"),
     }
+}
+
+#[test]
+fn strtoi_builtin_runs() {
+    match run(r#"strtoi "42";"#, false) {
+        Ok(codegen::ExecutionResult::Int(n)) => assert_eq!(n, 42),
+        other => panic!("expected Int, got {other:?}"),
+    }
+}
+
+#[test]
+fn strtof_builtin_runs() {
+    match run(r#"strtof "1.5";"#, false) {
+        Ok(codegen::ExecutionResult::Float(n)) => assert_eq!(n, 1.5),
+        other => panic!("expected Float, got {other:?}"),
+    }
+}
+
+#[test]
+fn strtob_builtin_runs() {
+    match run(r#"strtob "true";"#, false) {
+        Ok(codegen::ExecutionResult::Bool(b)) => assert!(b),
+        other => panic!("expected Bool, got {other:?}"),
+    }
+    match run(r#"strtob "false";"#, false) {
+        Ok(codegen::ExecutionResult::Bool(b)) => assert!(!b),
+        other => panic!("expected Bool, got {other:?}"),
+    }
+}
+
+#[test]
+fn itof_builtin_runs() {
+    match run("itof 3;", false) {
+        Ok(codegen::ExecutionResult::Float(n)) => assert_eq!(n, 3.0),
+        other => panic!("expected Float, got {other:?}"),
+    }
+}
+
+#[test]
+fn ftoi_builtin_runs() {
+    // `ftoi` truncates toward zero.
+    match run("ftoi 3.9;", false) {
+        Ok(codegen::ExecutionResult::Int(n)) => assert_eq!(n, 3),
+        other => panic!("expected Int, got {other:?}"),
+    }
+}
+
+#[test]
+fn readin_lowers() {
+    // `readin` reads stdin at runtime, so just check it lowers cleanly.
+    let mut prog = ast::Program::parse("readin ();").unwrap();
+    ast::Program::typecheck(&mut prog).unwrap();
+    let context = codegen::new_context();
+    let module = codegen::lower(&prog, &context).unwrap();
+    assert!(module.dump().contains("@readin"));
 }
 
 #[test]

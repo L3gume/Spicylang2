@@ -9,7 +9,7 @@
 - [x] Fix conflict between negative integer literal and binary - operation
 - [x] MLIR code generation
     - [ ] Make sense of this stuff
-    - [ ] Actually compile and execute
+    - [x] Actually compile and execute
     - [x] Make repl jit-compiled
 - [ ] Better parser + lexer
     - [x] allow exprstmt in block
@@ -17,7 +17,7 @@
     - [ ] Better error messages in parse and typecheck
     - [x] Support comments
 - [ ] Pretty-printing of type and AST nodes
-    - [ ] abstract type variables in types => 'a, 'b, etc. instead of txx
+    - [x] abstract type variables in types => 'a, 'b, etc. instead of txx
 - [x] User-defined enumeration types
 - [ ] User-defined structure types
 - [x] Pattern Matching on expressions
@@ -34,3 +34,4 @@
     - [x] append
 - [ ] n-tuple type
 - [ ] tail call optimization
+- [ ] get rid of REPL, more trouble than worth
