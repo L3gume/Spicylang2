@@ -224,8 +224,8 @@ fn prelude_filter_odd() {
 
 #[test]
 fn prelude_boolean_logic() {
-    assert_eq!(expect_bool_prelude("even 4;"), true);
-    assert_eq!(expect_bool_prelude("odd 4;"), false);
+    assert!(expect_bool_prelude("even 4;"));
+    assert!(!expect_bool_prelude("odd 4;"));
 }
 
 // ----------------------------------------------------------------------------
