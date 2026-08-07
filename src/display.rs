@@ -31,6 +31,7 @@ fn render_type_inner(t: &Monotype, vars: &mut HashMap<String, String>) -> String
             TypeFunc::Float => "float".to_string(),
             TypeFunc::Bool => "bool".to_string(),
             TypeFunc::Str => "str".to_string(),
+            TypeFunc::Char => "char".to_string(),
             TypeFunc::Fn => args
                 .iter()
                 .map(|a| render_type_inner(a, vars))

@@ -228,7 +228,14 @@ Literal: Box<Lit> = {
     <n:r"[0-9]+">         => Box::new(Lit::Int(i32::from_str(n).unwrap())),
     "true"                  => Box::new(Lit::Bool(true)),
     "false"                 => Box::new(Lit::Bool(false)),
-    <s:r#"\"[^"]*\""#>      => Box::new(Lit::Str(s[1..s.len()-1].to_string())),
+    // A string is lexed permissively as `"..."` where each character is either
+    // an escape (`\X`, `\xHH`, or `\u{...}`) or a plain non-quote/non-backslash
+    // char; the escapes are decoded by `decode_string_literal` in the action.
+    <s:r#"\"(\\.|[^"\\\n\r])*\""#> => Box::new(Lit::Str(decode_string_literal(s))),
+    // A char literal is lexed permissively as `'...'` (a plain char, or a
+    // backslash escape: `\c`, `\xHH`, or `\u{...}`); the escape sequences are
+    // decoded by `decode_char_literal` in the action.
+    <c:r#"'(\\(u\{[^}]*\}|x[0-9a-fA-F]{2}|.)|[^'\\\n\r])'"#> => Box::new(Lit::Char(decode_char_literal(c))),
     "()"                    => Box::new(Lit::Unit),
 }
 

@@ -342,6 +342,30 @@ fn itof_builtin_runs() {
 }
 
 #[test]
+fn char_literal_runs() {
+    // A char literal is its Unicode code point, lowered as an `i32` and read
+    // back as a `char`.
+    match run("'a';", false) {
+        Ok(codegen::ExecutionResult::Char(c)) => assert_eq!(c, 'a'),
+        other => panic!("expected Char, got {other:?}"),
+    }
+    match run(r"'\n';", false) {
+        Ok(codegen::ExecutionResult::Char(c)) => assert_eq!(c, '\n'),
+        other => panic!("expected Char, got {other:?}"),
+    }
+}
+
+#[test]
+fn escaped_string_literal_runs() {
+    // Escape sequences are decoded at parse time, so the runtime string
+    // contains the real newline.
+    match run(r#""a\nb";"#, false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "a\nb"),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
 fn ftoi_builtin_runs() {
     // `ftoi` truncates toward zero.
     match run("ftoi 3.9;", false) {

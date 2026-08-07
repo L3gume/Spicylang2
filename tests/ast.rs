@@ -72,9 +72,99 @@ use spicylang2::types::*;
     }
 
     #[test]
+    fn string_escape_newline() {
+        let p = parse(r#""a\nb";"#);
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("a\nb".to_string())))))));
+    }
+
+    #[test]
+    fn string_escape_tab() {
+        let p = parse(r#""a\tb";"#);
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("a\tb".to_string())))))));
+    }
+
+    #[test]
+    fn string_escape_null() {
+        let p = parse(r#""a\0b";"#);
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("a\0b".to_string())))))));
+    }
+
+    #[test]
+    fn string_escape_quote() {
+        let p = parse(r#""\"hi\"";"#);
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("\"hi\"".to_string())))))));
+    }
+
+    #[test]
+    fn string_escape_backslash() {
+        let p = parse(r#""a\\b";"#);
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("a\\b".to_string())))))));
+    }
+
+    #[test]
+    fn string_escape_hex() {
+        let p = parse(r#""\x41\x42";"#);
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("AB".to_string())))))));
+    }
+
+    #[test]
+    fn string_escape_unicode() {
+        let p = parse(r#""hi \u{1F600}";"#);
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("hi 😀".to_string())))))));
+    }
+
+    #[test]
     fn unit_literal() {
         let p = parse("();");
         assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Unit))))));
+    }
+
+    #[test]
+    fn char_literal() {
+        let p = parse("'a';");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Char('a')))))));
+    }
+
+    #[test]
+    fn char_escape_newline() {
+        let p = parse(r"'\n';");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Char('\n')))))));
+    }
+
+    #[test]
+    fn char_escape_null() {
+        let p = parse(r"'\0';");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Char('\0')))))));
+    }
+
+    #[test]
+    fn char_escape_tab() {
+        let p = parse(r"'\t';");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Char('\t')))))));
+    }
+
+    #[test]
+    fn char_escape_single_quote() {
+        let p = parse(r"'\'';");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Char('\'')))))));
+    }
+
+    #[test]
+    fn char_escape_backslash() {
+        let p = parse(r"'\\';");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Char('\\')))))));
+    }
+
+    #[test]
+    fn char_escape_hex() {
+        let p = parse(r"'\x41';");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Char('A')))))));
+    }
+
+    #[test]
+    fn char_escape_unicode() {
+        let p = parse(r"'\u{1F600}';");
+        assert_eq!(&*first(&p).s, &SNode::Expr(Box::new(Expr::from(ENode::Literal(Box::new(Lit::Char('😀')))))));
     }
 
     // ---- Variables ----

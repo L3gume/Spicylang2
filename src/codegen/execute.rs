@@ -11,6 +11,7 @@ pub enum ExecutionResult {
     Float(f32),
     Bool(bool),
     String(String),
+    Char(char),
     List(Vec<ExecutionResult>),
     Unit,
 }
@@ -22,6 +23,7 @@ impl std::fmt::Debug for ExecutionResult {
             ExecutionResult::Float(n) => write!(f, "{}", n),
             ExecutionResult::Bool(b) => write!(f, "{}", b),
             ExecutionResult::String(s) => write!(f, "\"{}\"", s),
+            ExecutionResult::Char(c) => write!(f, "\'{}\'", c),
             ExecutionResult::List(items) => {
                 let rendered: Vec<String> = items.iter().map(|i| format!("{:?}", i)).collect();
                 write!(f, "[{}]", rendered.join(", "))
@@ -145,6 +147,15 @@ fn invoke(
                     };
                     Ok(ExecutionResult::String(s))
                 }
+            }
+            TypeFunc::Char => {
+                let mut result: i32 = 0;
+                unsafe {
+                    engine
+                        .invoke_packed(symbol, &mut [&mut result as *mut i32 as *mut ()])
+                        .map_err(|e| format!("codegen: jit invocation failed: {}", e))?;
+                }
+                Ok(ExecutionResult::Char(char::from_u32(result as u32).unwrap_or('\u{FFFD}')))
             }
             TypeFunc::Unit => {
                 // Unit expressions are materialized as `i32` in MLIR, so the

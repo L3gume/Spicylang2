@@ -89,7 +89,70 @@ pub enum Lit {
     Float(f32),
     Bool(bool),
     Str(String),
+    Char(char),
     Unit,
+}
+
+/// Decode the escape sequence beginning at `\` (with the iterator already past
+/// the backslash), returning the character it denotes. Supported escapes are
+/// `\n`, `\t`, `\r`, `\0`, `\a`, `\b`, `\f`, `\v`, `\\`, `\'`, `\"`, `\xHH`,
+/// and `\u{...}`. An unknown escape yields the escaped character itself (so
+/// `\q` is `q`).
+fn decode_escape(chars: &mut std::str::Chars) -> char {
+    match chars.next() {
+        Some('n') => '\n',
+        Some('t') => '\t',
+        Some('r') => '\r',
+        Some('0') => '\0',
+        Some('a') => '\x07',
+        Some('b') => '\x08',
+        Some('f') => '\x0c',
+        Some('v') => '\x0b',
+        Some('\\') => '\\',
+        Some('\'') => '\'',
+        Some('"') => '"',
+        Some('x') => {
+            let hex: String = chars.take(2).collect();
+            let code = u32::from_str_radix(&hex, 16).unwrap_or(0);
+            char::from_u32(code).unwrap_or('\0')
+        }
+        Some('u') => {
+            chars.next(); // '{'
+            let digits: String = chars.take_while(|c| *c != '}').collect();
+            let code = u32::from_str_radix(&digits, 16).unwrap_or(0);
+            char::from_u32(code).unwrap_or('\0')
+        }
+        Some(other) => other,
+        None => '\0',
+    }
+}
+
+/// Decode a single-quoted char literal (including its quotes), resolving the
+/// escape sequences handled by [`decode_escape`].
+pub(crate) fn decode_char_literal(raw: &str) -> char {
+    let inner = &raw[1..raw.len().saturating_sub(1)];
+    let mut chars = inner.chars();
+    match chars.next() {
+        None => '\0',
+        Some('\\') => decode_escape(&mut chars),
+        Some(c) => c,
+    }
+}
+
+/// Decode a double-quoted string literal (including its quotes), resolving
+/// escape sequences with the same rules as [`decode_char_literal`].
+pub(crate) fn decode_string_literal(raw: &str) -> String {
+    let inner = &raw[1..raw.len().saturating_sub(1)];
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            out.push(decode_escape(&mut chars));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]

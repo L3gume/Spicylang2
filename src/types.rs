@@ -13,6 +13,7 @@ pub enum TypeFunc {
     Float,
     Bool,
     Str,
+    Char,
     Fn, // ->
     List,
     Enum(String)
@@ -93,6 +94,10 @@ impl Monotype {
 
     pub fn string() -> Monotype {
         Monotype::TypeFuncApplication(Box::new(TypeFunc::Str), vec![])
+    }
+
+    pub fn char() -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Char), vec![])
     }
 
     pub fn unit() -> Monotype {
@@ -771,6 +776,7 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
                 Lit::Bool(_) => Monotype::bool(),
                 Lit::Str(_) => Monotype::string(),
                 Lit::Float(_) => Monotype::float(),
+                Lit::Char(_) => Monotype::char(),
                 Lit::Unit => Monotype::unit(),
             };
             Ok((Substitution::new(), typ))

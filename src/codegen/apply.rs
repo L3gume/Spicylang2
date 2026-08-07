@@ -1048,6 +1048,13 @@ pub(crate) fn lower_literal<'c, 'a>(
                     IntegerAttribute::new(IntegerType::new(module.context, 32).into(), 0).into(),
                     location,
                 ),
+                Lit::Char(value) => arith::constant(
+                    module.context,
+                    IntegerAttribute::new(
+                        IntegerType::new(module.context, 32).into(),
+                        *value as i64).into(),
+                    location
+                ),
                 Lit::Str(_) => unreachable!(),
             };
             // The op must be appended to the block before its results are used,

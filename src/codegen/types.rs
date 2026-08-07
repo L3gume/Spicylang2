@@ -20,6 +20,7 @@ pub(crate) fn lower_type<'a>(typ: &Monotype, module: &Module<'a>) -> Result<Type
             TypeFunc::Bool => Ok(IntegerType::new(module.context, 1).into()),
             TypeFunc::Str => Type::parse(module.context, "!llvm.ptr")
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string()),
+            TypeFunc::Char => Ok(IntegerType::new(module.context, 32).into()),
             TypeFunc::Unit => Ok(IntegerType::new(module.context, 32).into()),
             TypeFunc::Infer => Err(
                 "codegen: cannot lower an unresolved (inferred) type".to_string(),

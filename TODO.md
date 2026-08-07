@@ -30,13 +30,23 @@
     - [x] indexing (?) -- added some sort of indexing
     - [x] append
 - [ ] new types
-    - [ ] escape sequences in strings
-    - [ ] char
+    - [x] escape sequences in strings
+    - [x] char
     - [ ] User-defined structure types
     - [ ] n-tuple type
-- [ ] get rid of REPL, more trouble than worth (or make it useable?)
+- [x] get rid of REPL, more trouble than worth (or make it useable?)
+    * simply ignore it for now I guess
 - [ ] optimizations
     - [ ] tail call optimization
     - [ ] bool short-circuiting
 - [ ] lifetime analysis for memory mgmt with refs like in Rust
-- [ ] str format builtin
+- [ ] str-related builtins
+    - [ ] format (str -> fn (depends on number of format specifiers in input str))
+    - [ ] to_chars (str -> list char) builtin
+    - [ ] from_chars (list char -> str) builtin
+    - [ ] get_at (int -> str -> option char)
+    - [ ] len (str -> int)
+    - [ ] substr
+    - [ ] trim, rtrim, ltrim
+    - [ ] whatever else, leverage libc I guess
+- [ ] unicode character support

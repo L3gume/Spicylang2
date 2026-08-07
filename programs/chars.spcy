@@ -1,0 +1,6 @@
+let get_char = \(_ : ()) => 'a';
+
+print "hello, world!\n";
+print "hello, world!\n";
+print "hello, world!\n";
+print "hello, world!\n";
