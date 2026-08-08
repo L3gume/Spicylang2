@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use crate::prelude::get_prelude;
 use crate::types::*;
 use crate::grammar;
@@ -15,6 +16,12 @@ pub struct Pos {
     /// codegen once the line/column span is filled.
     pub start: u32,
     pub end: u32,
+}
+
+impl Display for Pos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[L:{}, C:{}]", self.start_line, self.start_col)
+    }
 }
 
 impl Pos {
@@ -93,6 +100,19 @@ pub enum Lit {
     Unit,
 }
 
+impl Display for Lit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Lit::Int(i) => write!(f, "Int({})", i),
+            Lit::Float(r) => write!(f, "Float({})", r),
+            Lit::Bool(b) => write!(f, "Bool({})", b),
+            Lit::Str(s) => write!(f, "Str(\"{}\")", s),
+            Lit::Char(c) => write!(f, "Char(\'{}\')", c),
+            Lit::Unit => write!(f, "Unit()"),
+        }
+    }
+}
+
 /// Decode the escape sequence beginning at `\` (with the iterator already past
 /// the backslash), returning the character it denotes. Supported escapes are
 /// `\n`, `\t`, `\r`, `\0`, `\a`, `\b`, `\f`, `\v`, `\\`, `\'`, `\"`, `\xHH`,
@@ -160,13 +180,35 @@ pub struct Type {
     pub t: Monotype
 }
 
+impl Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.t)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding(pub String, pub Box<Type>);
+
+impl Display for Binding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {})", self.0, self.1)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeDec {
     Alias(Box<Type>),
     Enum(Vec<Variant>)
+}
+
+impl Display for TypeDec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Alias(t) => write!(f, "Alias({})", t),
+            Self::Enum(variants) => write!(f, "Enum(\n{}\n)",
+                variants.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,10 +217,22 @@ pub struct Variant {
     pub tparams : Vec<Type>
 }
 
+impl Display for Variant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}({})", self.n, self.tparams.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeHeader {
     pub n : String,
     pub tvars : Vec<String>
+}
+
+impl Display for TypeHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}({})", self.n, self.tvars.join(", "))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,12 +242,28 @@ pub enum SNode {
     TypeDecl(TypeHeader, Box<TypeDec>) // name <type vars> = <type>
 }
 
+impl Display for SNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decl(expr, typ, expr1) => write!(f, "Decl({}: {}, {})", expr, typ, expr1),
+            Self::Expr(expr) => write!(f, "Expr({})", expr),
+            Self::TypeDecl(type_header, type_dec) => write!(f, "TypeDecl({}, {}", type_header, type_dec),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Stmt {
     pub s : Box<SNode>,
     pub ctx : TypeContext,
     pub pos : Pos
     // TODO
+}
+
+impl Display for Stmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Stmt({},\n{})", self.pos, self.s)
+    }
 }
 
 impl PartialEq for Stmt {
@@ -216,52 +286,6 @@ impl Stmt {
             pos
         }
     }
-
-    pub fn typecheck(&mut self, ctx : &TypeContext) -> Result<(Substitution, Monotype), UnificationError> {
-        let result = (|| -> Result<(Substitution, Monotype), UnificationError> {
-            let mut context = ctx.clone();
-            let (combined, typ) = match &mut *self.s {
-                SNode::Decl(e1, t1, e2) => {
-                    let var_name = match &*e1.e {
-                        ENode::Variable(name) => name.clone(),
-                        _ => return Err(UnificationError { pos: None, message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
-                    };
-                    if TypeContext::is_builtin(&var_name) {
-                        return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
-                    }
-                    let binding_type = type_to_typefn(t1, &mut context)?;
-                    let old_binding = context.get(&var_name);
-                    context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
-                    let (s1, inferred_type) = algo_w(&mut context, e2)?;
-                    let s2 = unify(&binding_type.apply(&s1), &inferred_type)?;
-                    let combined = s1.combine(s2);
-                    context = context.apply(&combined);
-                    match old_binding {
-                        Some(poly) => context.add(var_name.clone(), poly),
-                        None => context.remove(&var_name),
-                    }
-                    let resolved_typ = binding_type.apply(&combined);
-                    let generalized = context.generalise(&resolved_typ);
-                    context.add(var_name, generalized);
-                    self.ctx = context;
-                    (combined, resolved_typ)
-                },
-                SNode::Expr(e1) => {
-                    let (sub, typ) = algo_w(&mut context, e1)?;
-                    self.ctx = context.apply(&sub);
-                    (sub, typ)
-                },
-                SNode::TypeDecl(header, dec) => {
-                    handle_type_decl(header, dec, &mut context)?;
-                    self.ctx = context;
-                    (Substitution::new(), Monotype::unit())
-                }
-            };
-            resolve_stmt_types(self, &combined);
-            Ok((combined, typ))
-        })();
-        result.map_err(|e| e.with_pos(self.pos.clone()))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -282,84 +306,36 @@ pub enum ENode {
     Match(Box<Expr>, Vec<MatchCase>)
 }
 
-/// Apply `sub` to the recorded (`algo_w`-annotated) type of every expression
-/// reachable from `stmt`. Runs after a statement is type-checked, once the
-/// statement's full substitution is known, resolving inferred types into
-/// concrete ones. Type variables bound by a generalized `let` are resolved
-/// too: codegen targets monomorphic MLIR, so each instantiation is specialized
-/// at its use site rather than kept polymorphic.
-pub fn resolve_stmt_types(stmt : &mut Stmt, sub : &Substitution) {
-    match &mut *stmt.s {
-        SNode::Decl(e1, _, e2) => {
-            resolve_expr_types(e1, sub);
-            resolve_expr_types(e2, sub);
-        },
-        SNode::Expr(e1) => resolve_expr_types(e1, sub),
-        SNode::TypeDecl(_, _) => {}
+impl Display for ENode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ENode::Variable(n) => write!(f, "Var({})", n),
+            ENode::Literal(lit) => write!(f, "Lit({})", lit),
+            ENode::Abstraction(binding, expr) => write!(f, "Abs({} -> {})", binding, expr),
+            ENode::Application(expr, expr1) => write!(f, "App({}, {})", expr, expr1),
+            ENode::Let(n, expr, expr1) => write!(f, "Let({} = {}, {})", n, expr, expr1),
+            ENode::IfElse(expr, expr1, expr2) => write!(f, "IfThenElse({}, {}, {})", expr, expr1, expr2),
+            ENode::Block(stmts, expr) => write!(f, "Block({}\n{})", stmts.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n"), expr),
+            ENode::Comparison(comp_op, expr, expr1) => write!(f, "Comp({}, {}, {})", comp_op, expr, expr1),
+            ENode::Arithmetic(arith_op, expr, expr1) => write!(f, "Arith({}, {}, {})", arith_op, expr, expr1),
+            ENode::Logical(logical_op, expr, expr1) => write!(f, "Logic({}, {}, {})", logical_op, expr, expr1),
+            ENode::Unary(unary_op, expr) => write!(f, "Unary({}, {})", unary_op, expr),
+            ENode::List(exprs) => write!(f, "List({})", exprs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")),
+            ENode::Cons(expr, expr1) => write!(f, "Cons({}, {})", expr, expr1),
+            ENode::Match(expr, match_cases) => write!(f, "Match({}, {})", expr, match_cases.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")),
+        }
     }
 }
 
-/// Apply `sub` to the recorded type of `expr` and everything reachable from
-/// it. Used by codegen to specialize a lambda body: the definition statement
-/// may leave free type variables (e.g. a recursive use), which the
-/// instantiation's substitution replaces with concrete types.
-pub fn apply_substitution(expr : &mut Expr, sub : &Substitution) {
-    resolve_expr_types(expr, sub);
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchCase {
+    pub val : Box<Expr>,
+    pub exp : Box<Expr>
 }
 
-fn resolve_expr_types(expr : &mut Expr, sub : &Substitution) {
-    expr.typ = expr.typ.apply(sub);
-    match &mut *expr.e {
-        ENode::Variable(_) | ENode::Literal(_) => {}
-        ENode::Abstraction(_, body) => resolve_expr_types(body, sub),
-        ENode::Application(f, x) => {
-            resolve_expr_types(f, sub);
-            resolve_expr_types(x, sub);
-        },
-        ENode::Let(_, e1, e2) => {
-            resolve_expr_types(e1, sub);
-            resolve_expr_types(e2, sub);
-        },
-        ENode::IfElse(c, t, e) => {
-            resolve_expr_types(c, sub);
-            resolve_expr_types(t, sub);
-            resolve_expr_types(e, sub);
-        },
-        ENode::Block(stmts, e) => {
-            for s in stmts.iter_mut() {
-                resolve_stmt_types(s, sub);
-            }
-            resolve_expr_types(e, sub);
-        },
-        ENode::Comparison(_, a, b) => {
-            resolve_expr_types(a, sub);
-            resolve_expr_types(b, sub);
-        },
-        ENode::Arithmetic(_, a, b) => {
-            resolve_expr_types(a, sub);
-            resolve_expr_types(b, sub);
-        },
-        ENode::Logical(_, a, b) => {
-            resolve_expr_types(a, sub);
-            resolve_expr_types(b, sub);
-        },
-        ENode::Unary(_, e) => resolve_expr_types(e, sub),
-        ENode::List(es) => {
-            for e in es.iter_mut() {
-                resolve_expr_types(e, sub);
-            }
-        },
-        ENode::Cons(h, t) => {
-            resolve_expr_types(h, sub);
-            resolve_expr_types(t, sub);
-        },
-        ENode::Match(scrut, cases) => {
-            resolve_expr_types(scrut, sub);
-            for c in cases.iter_mut() {
-                resolve_expr_types(&mut c.val, sub);
-                resolve_expr_types(&mut c.exp, sub);
-            }
-        },
+impl Display for MatchCase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Case({} => {})", self.val, self.exp)
     }
 }
 
@@ -370,9 +346,15 @@ pub struct Expr {
     pub pos : Pos,
     /// The inferred type of this expression: filled with the raw type during
     /// typechecking (`algo_w`) and resolved by the post-typecheck pass
-    /// ([`resolve_stmt_types`]) once the statement's full substitution is
-    /// known.
+    /// ([`crate::types::resolve_stmt_types`]) once the statement's full
+    /// substitution is known.
     pub typ : Monotype,
+}
+
+impl Display for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Expr({},\n{})", self.pos, self.e)
+    }
 }
 
 impl PartialEq for Expr {
@@ -472,12 +454,6 @@ fn fill_expr_positions(expr : &mut Expr, index : &LineIndex) {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MatchCase {
-    pub val : Box<Expr>,
-    pub exp : Box<Expr>
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum CompOp {
     Eq,
     NotEq,
@@ -485,6 +461,19 @@ pub enum CompOp {
     Greater,
     LessEq,
     GreatEq,
+}
+
+impl Display for CompOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompOp::Eq => write!(f, "Eq"),
+            CompOp::NotEq => write!(f, "NotEq"),
+            CompOp::Less => write!(f, "Less"),
+            CompOp::Greater => write!(f, "Greater"),
+            CompOp::LessEq => write!(f, "LessEq"),
+            CompOp::GreatEq => write!(f, "GreatEq"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -496,6 +485,18 @@ pub enum ArithOp {
     Mod,
 }
 
+impl Display for ArithOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArithOp::Plus => write!(f, "Plus"),
+            ArithOp::Minus => write!(f, "Minus"),
+            ArithOp::Div => write!(f, "Div"),
+            ArithOp::Times => write!(f, "Times"),
+            ArithOp::Mod => write!(f, "Mod"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalOp {
     And,
@@ -503,10 +504,29 @@ pub enum LogicalOp {
     Xor,
 }
 
+impl Display for LogicalOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogicalOp::And => write!(f, "And"),
+            LogicalOp::Or => write!(f, "Or"),
+            LogicalOp::Xor => write!(f, "Xor"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
     Negate,
     Not
+}
+
+impl Display for UnaryOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnaryOp::Negate => write!(f, "Negate"),
+            UnaryOp::Not => write!(f, "Not"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -518,10 +538,56 @@ pub struct Program {
     pub source_name : String
 }
 
+impl Display for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Program({},\n{})", self.source_name, self.stmts.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("\n"))
+    }
+}
+
+/// Format a LALRPOP parse error, converting its raw byte offsets to 1-based
+/// (line, column) positions via `index`. `T` is the generated token type,
+/// which implements `Display`.
+fn format_parse_error<L, T, E>(
+    error: &lalrpop_util::ParseError<L, T, E>,
+    index: &LineIndex,
+) -> String
+where
+    L: Copy + Into<usize>,
+    T: std::fmt::Display,
+    E: std::fmt::Display,
+{
+    use lalrpop_util::ParseError;
+    let at = |byte: L| {
+        let (line, col) = index.line_col(byte.into() as u32);
+        format!("{line}:{col}")
+    };
+    match error {
+        ParseError::InvalidToken { location } => {
+            format!("parse error at {}: invalid token", at(*location))
+        }
+        ParseError::UnrecognizedEof { location, expected } => format!(
+            "parse error at {}: unexpected end of input (expected {})",
+            at(*location),
+            expected.join(" or ")
+        ),
+        ParseError::UnrecognizedToken { token: (start, tok, _), expected } => format!(
+            "parse error at {}: unexpected token `{tok}` (expected {})",
+            at(*start),
+            expected.join(" or ")
+        ),
+        ParseError::ExtraToken { token: (start, tok, _) } => {
+            format!("parse error at {}: extra token `{tok}`", at(*start))
+        }
+        ParseError::User { error } => format!("parse error: {error}"),
+    }
+}
+
 impl Program {
     pub fn parse(buf : &str) -> Result<Box<Program>, String> {
-        let mut program = grammar::ProgParser::new().parse(buf).map_err(|e| format!("{}", e))?;
         let index = LineIndex::new(buf);
+        let mut program = grammar::ProgParser::new()
+            .parse(buf)
+            .map_err(|e| format_parse_error(&e, &index))?;
         for stmt in program.stmts.iter_mut() {
             fill_stmt_positions(stmt, &index);
         }
@@ -533,13 +599,5 @@ impl Program {
         let prelude = get_prelude();
         program.stmts.splice(0..0, prelude.iter().cloned());
         Ok(program)
-    }
-
-    pub fn typecheck(prog : &mut Program) -> Result<(), UnificationError> {
-        for stmt in prog.stmts.iter_mut() {
-            stmt.typecheck(&prog.ctx)?;
-            prog.ctx = stmt.ctx.clone();
-        }
-        Ok(())
     }
 }

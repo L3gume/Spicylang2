@@ -53,6 +53,10 @@ fn main() {
             };
             prog.source_name = path.clone();
 
+            if dump_ast {
+                println!("{}", *prog);
+            }
+
             if let Err(e) = Program::typecheck(&mut prog) {
                 match e.pos {
                     Some(ref pos) => eprintln!(
@@ -72,6 +76,7 @@ fn main() {
                         "codegen: ok ({} top-level functions)",
                         module.function_count()
                     );
+
                     if dump_mlir {
                         println!("{}", module.dump());
                     }
@@ -84,10 +89,6 @@ fn main() {
                     eprintln!("codegen: error: {}", e);
                     process::exit(3);
                 }
-            }
-
-            if dump_ast {
-                println!("{:#?}", *prog);
             }
 
             if start_repl {

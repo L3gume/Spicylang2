@@ -49,7 +49,7 @@ pub(crate) fn lower_expr<'c, 'a>(
             lower_abstraction(expr, binding, body, block, module, env, location)
         }
         ENode::Application(f, x) => lower_application(f, x, block, module, env, location),
-        ENode::Let(name, e1, e2) => lower_let(name, e1, e2, block, module, env, location),
+        ENode::Let(name, e1, e2) => lower_let(name, e1, e2, block, module, env),
         ENode::IfElse(c, t, e) => lower_ifelse(c, t, e, &expr.typ, block, module, env, location),
         ENode::Block(stmts, e) => lower_block(stmts, e, block, module, env),
         ENode::Match(scrut, cases) => lower_match(scrut, cases, &expr.typ, block, module, env),
@@ -359,7 +359,7 @@ fn lower_block<'c, 'a>(
 /// Lower a statement that appears inside a block expression: declarations
 /// become local SSA bindings (unlike top-level declarations, which become
 /// symbols).
-fn lower_block_stmt<'c, 'a>(
+pub(crate) fn lower_block_stmt<'c, 'a>(
     stmt: &Stmt,
     block: &'a Block<'c>,
     module: &mut Module<'c>,
@@ -457,86 +457,7 @@ fn lower_match_cases<'c, 'a: 'b, 'b>(
         }
     }
 
-    // The bindings this pattern produces (loaded in the branch body) and, for
-    // constructor patterns, the discriminant it must equal.
-    let (binding, ctor_index) = match &*case.val.e {
-        ENode::Literal(_) => (None, None),
-        ENode::List(es) if es.is_empty() => (None, None),
-        ENode::Cons(hd, tl) => {
-            let (hd_name, tl_name) = match (&*hd.e, &*tl.e) {
-                (ENode::Variable(h), ENode::Variable(t)) => (h.clone(), t.clone()),
-                _ => {
-                    return Err(
-                        "codegen: only `x::xs` cons patterns are supported".to_string()
-                    )
-                }
-            };
-            let elem = elem_mlir
-                .ok_or_else(|| "codegen: cons pattern requires a list scrutinee".to_string())?;
-            (
-                Some(PatternBind::Cons {
-                    head_name: hd_name,
-                    head_type: elem,
-                    tail_name: tl_name,
-                }),
-                None,
-            )
-        }
-        // `Some x` binds the constructor's payload field.
-        ENode::Application(ctor, arg) => {
-            let ctor_name = match &*ctor.e {
-                ENode::Variable(n) => n.clone(),
-                _ => {
-                    return Err(format!(
-                        "codegen: unsupported match pattern {:?}",
-                        *case.val.e
-                    ))
-                }
-            };
-            let &(ref enum_name, variant_index, arity) = module
-                .constructors
-                .get(&ctor_name)
-                .ok_or_else(|| {
-                    format!("codegen: unsupported match pattern {:?}", *case.val.e)
-                })?;
-            if arity != 1 {
-                return Err(format!(
-                    "codegen: constructor pattern `{ctor_name}` with arity {arity} is not supported"
-                ));
-            }
-            let bound = pattern_bound_vars(arg);
-            if bound.len() != 1 {
-                return Err(
-                    "codegen: only single-variable constructor patterns are supported"
-                        .to_string(),
-                );
-            }
-            let fields = enum_variant_fields(module, scrut_typ, enum_name, variant_index)?;
-            let field_type = lower_type(&default_free_vars(&fields[0]), module)?;
-            (
-                Some(PatternBind::Enum(vec![(bound[0].clone(), field_type)])),
-                Some(variant_index),
-            )
-        }
-        // A nullary constructor pattern `None`.
-        ENode::Variable(name) => {
-            let &(_, variant_index, arity) = module.constructors.get(name).ok_or_else(|| {
-                format!("codegen: unsupported match pattern {:?}", *case.val.e)
-            })?;
-            if arity != 0 {
-                return Err(format!(
-                    "codegen: constructor pattern `{name}` with arity {arity} is not supported"
-                ));
-            }
-            (None, Some(variant_index))
-        }
-        other => {
-            return Err(format!(
-                "codegen: unsupported match pattern {:?}",
-                *other
-            ))
-        }
-    };
+    let (binding, ctor_index) = case_pattern(case, scrut_typ, elem_mlir, module)?;
 
     // The last case is guaranteed to match (exhaustiveness), so lower it
     // directly instead of wrapping it in one more `scf.if`.
@@ -548,45 +469,7 @@ fn lower_match_cases<'c, 'a: 'b, 'b>(
         return lower_expr(&case.exp, block, module, &mut case_env);
     }
 
-    // The condition for this case.
-    let cond: Value<'c, 'b> = match &*case.val.e {
-        // `lit => e` matches when `scrut == lit`.
-        ENode::Literal(lit) => {
-            let pattern = lower_literal(lit, block, module, location)?;
-            let cmp = arith::cmpi(
-                module.context,
-                arith::CmpiPredicate::Eq,
-                scrut,
-                pattern,
-                location,
-            );
-            block
-                .append_operation(cmp)
-                .result(0)
-                .map_err(|e| e.to_string())?
-                .into()
-        }
-        // `[] => e` matches when the list is empty (null).
-        ENode::List(_) => list_is_null(scrut, block, module, location)?,
-        // `x::xs => e` matches when the list is non-empty.
-        ENode::Cons(..) => {
-            let is_null = list_is_null(scrut, block, module, location)?;
-            let one = bool_constant(module, block, true, location)?;
-            let not_null_op = arith_binop("arith.xori", is_null, one, location)?;
-            block
-                .append_operation(not_null_op)
-                .result(0)
-                .map_err(|e| e.to_string())?
-                .into()
-        }
-        // `Some x` / `None` match on the discriminant.
-        _ => {
-            let index = ctor_index.ok_or_else(|| {
-                "codegen: internal error: missing constructor index".to_string()
-            })?;
-            enum_disc_eq(module, block, scrut, index, location)?
-        }
-    };
+    let cond = case_condition(case, ctor_index, scrut, block, module, location)?;
 
     let mut then_env = env.clone();
     let then_block = Block::new(&[]);
@@ -621,4 +504,141 @@ fn lower_match_cases<'c, 'a: 'b, 'b>(
         .result(0)
         .map_err(|e| e.to_string())
         .map(Into::into)
+}
+
+/// The bindings a non-catch-all case pattern produces (loaded in the branch
+/// body) and, for constructor patterns, the discriminant it must equal.
+pub(crate) fn case_pattern<'c>(
+    case: &MatchCase,
+    scrut_typ: &Monotype,
+    elem_mlir: Option<Type<'c>>,
+    module: &mut Module<'c>,
+) -> Result<(Option<PatternBind<'c>>, Option<usize>), String> {
+    match &*case.val.e {
+        ENode::Literal(_) => Ok((None, None)),
+        ENode::List(es) if es.is_empty() => Ok((None, None)),
+        ENode::Cons(hd, tl) => {
+            let (hd_name, tl_name) = match (&*hd.e, &*tl.e) {
+                (ENode::Variable(h), ENode::Variable(t)) => (h.clone(), t.clone()),
+                _ => {
+                    return Err(
+                        "codegen: only `x::xs` cons patterns are supported".to_string()
+                    )
+                }
+            };
+            let elem = elem_mlir
+                .ok_or_else(|| "codegen: cons pattern requires a list scrutinee".to_string())?;
+            Ok((
+                Some(PatternBind::Cons {
+                    head_name: hd_name,
+                    head_type: elem,
+                    tail_name: tl_name,
+                }),
+                None,
+            ))
+        }
+        // `Some x` binds the constructor's payload field.
+        ENode::Application(ctor, arg) => {
+            let ctor_name = match &*ctor.e {
+                ENode::Variable(n) => n.clone(),
+                _ => {
+                    return Err(format!(
+                        "codegen: unsupported match pattern {:?}",
+                        *case.val.e
+                    ))
+                }
+            };
+            let &(ref enum_name, variant_index, arity) = module
+                .constructors
+                .get(&ctor_name)
+                .ok_or_else(|| {
+                    format!("codegen: unsupported match pattern {:?}", *case.val.e)
+                })?;
+            if arity != 1 {
+                return Err(format!(
+                    "codegen: constructor pattern `{ctor_name}` with arity {arity} is not supported"
+                ));
+            }
+            let bound = pattern_bound_vars(arg);
+            if bound.len() != 1 {
+                return Err(
+                    "codegen: only single-variable constructor patterns are supported"
+                        .to_string(),
+                );
+            }
+            let fields = enum_variant_fields(module, scrut_typ, enum_name, variant_index)?;
+            let field_type = lower_type(&default_free_vars(&fields[0]), module)?;
+            Ok((
+                Some(PatternBind::Enum(vec![(bound[0].clone(), field_type)])),
+                Some(variant_index),
+            ))
+        }
+        // A nullary constructor pattern `None`.
+        ENode::Variable(name) => {
+            let &(_, variant_index, arity) = module.constructors.get(name).ok_or_else(|| {
+                format!("codegen: unsupported match pattern {:?}", *case.val.e)
+            })?;
+            if arity != 0 {
+                return Err(format!(
+                    "codegen: constructor pattern `{name}` with arity {arity} is not supported"
+                ));
+            }
+            Ok((None, Some(variant_index)))
+        }
+        other => Err(format!(
+            "codegen: unsupported match pattern {:?}",
+            *other
+        )),
+    }
+}
+
+/// The `i1` condition under which a non-catch-all case matches: a literal
+/// compares for equality, `[]` tests for an empty list, `x::xs` tests for a
+/// non-empty list, and constructor patterns compare the discriminant.
+pub(crate) fn case_condition<'c, 'a>(
+    case: &MatchCase,
+    ctor_index: Option<usize>,
+    scrut: Value<'c, 'a>,
+    block: &'a Block<'c>,
+    module: &mut Module<'c>,
+    location: Location<'c>,
+) -> Result<Value<'c, 'a>, String> {
+    match &*case.val.e {
+        // `lit => e` matches when `scrut == lit`.
+        ENode::Literal(lit) => {
+            let pattern = lower_literal(lit, block, module, location)?;
+            let cmp = arith::cmpi(
+                module.context,
+                arith::CmpiPredicate::Eq,
+                scrut,
+                pattern,
+                location,
+            );
+            block
+                .append_operation(cmp)
+                .result(0)
+                .map_err(|e| e.to_string())
+                .map(Into::into)
+        }
+        // `[] => e` matches when the list is empty (null).
+        ENode::List(_) => list_is_null(scrut, block, module, location),
+        // `x::xs => e` matches when the list is non-empty.
+        ENode::Cons(..) => {
+            let is_null = list_is_null(scrut, block, module, location)?;
+            let one = bool_constant(module, block, true, location)?;
+            let not_null_op = arith_binop("arith.xori", is_null, one, location)?;
+            block
+                .append_operation(not_null_op)
+                .result(0)
+                .map_err(|e| e.to_string())
+                .map(Into::into)
+        }
+        // `Some x` / `None` match on the discriminant.
+        _ => {
+            let index = ctor_index.ok_or_else(|| {
+                "codegen: internal error: missing constructor index".to_string()
+            })?;
+            enum_disc_eq(module, block, scrut, index, location)
+        }
+    }
 }

@@ -396,3 +396,88 @@ fn codegen_ops_carry_source_locations() {
     assert!(dump.contains("test.spcy:1:9"), "missing stmt-1 loc in:\n{dump}");
     assert!(dump.contains("test.spcy:2:1"), "missing stmt-2 loc in:\n{dump}");
 }
+
+// ----------------------------------------------------------------------------
+// Tail call optimization
+// ----------------------------------------------------------------------------
+
+#[test]
+fn tail_recursion_if_else_deep() {
+    // 1M-deep self tail recursion: a stack overflow without TCO.
+    assert_eq!(
+        expect_int("let count = \\n acc => if n == 0 then acc else count (n - 1) (acc + 1); count 1000000 0;"),
+        1000000
+    );
+}
+
+#[test]
+fn tail_recursion_through_match_deep() {
+    // The self call sits in a match branch in tail position.
+    assert_eq!(
+        expect_int("let down = \\(n : int) => match n | 0 => 0 | x => down (x - 1); down 1000000;"),
+        0
+    );
+}
+
+#[test]
+fn tail_recursion_through_let_and_block() {
+    // The self call sits in a block tail in tail position.
+    assert_eq!(
+        expect_int(
+            "let down = \\(n : int) => if n == 0 then 0 else { let m = n - 1; down m }; down 1000000;"
+        ),
+        0
+    );
+}
+
+#[test]
+fn tail_recursive_local_loop() {
+    // The tl_fib shape from programs/fib.spcy: a let-bound loop whose self
+    // call is in tail position of the `else` branch.
+    assert_eq!(
+        expect_int(
+            "let tl_fib = \\(n : int) =>
+                let loop = \\i a b =>
+                    if i == n then a
+                    else loop (i + 1) (b) (a + b)
+                in loop 0 1 1;
+             tl_fib 10;"
+        ),
+        89
+    );
+}
+
+#[test]
+fn tail_recursion_with_capture() {
+    // `step` captures `start`; the backedge passes the capture through.
+    assert_eq!(
+        expect_int(
+            "let make = \\(start : int) =>
+                let step = \\n acc => if n == 0 then acc else step (n - 1) (acc + start)
+                in step 2 0;
+             make 5;"
+        ),
+        10
+    );
+}
+
+#[test]
+fn shadowed_self_name_is_not_a_self_tail_call() {
+    // The inner `f` shadows the recursive binding; the tail-position call is
+    // to the inner `f`, so no backedge may be emitted.
+    assert_eq!(
+        expect_int(
+            "let f = \\(n : int) => if n == 0 then 0 else (let f = \\(x : int) => 99 in f (n - 1)); f 5;"
+        ),
+        99
+    );
+}
+
+#[test]
+fn non_tail_recursion_still_works() {
+    // `f (x - 1) + 1` is not in tail position and stays a real call.
+    assert_eq!(
+        expect_int("let depth = \\(n : int) => if n == 0 then 0 else depth (n - 1) + 1; depth 1000;"),
+        1000
+    );
+}

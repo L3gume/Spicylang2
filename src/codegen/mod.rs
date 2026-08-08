@@ -11,6 +11,8 @@
 //! - [`expr`] lowers expressions.
 //! - [`closures`], [`lists`], [`enums`], [`types`] provide the pieces those
 //!   use (closure conversion, cons cells, tagged enum values, type mapping).
+//! - [`tail`] lowers self tail calls to loop backedges (tail call
+//!   optimization).
 //! - [`execute`] runs the compiled module through the JIT.
 
 mod apply;
@@ -20,6 +22,7 @@ mod execute;
 mod expr;
 mod lists;
 mod stmt;
+mod tail;
 mod types;
 
 pub use execute::{ExecutionResult, compile, execute};

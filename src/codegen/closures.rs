@@ -123,6 +123,104 @@ pub(crate) fn pattern_bound_vars(pat: &Expr) -> Vec<String> {
 }
 
 // ----------------------------------------------------------------------------
+// Self tail calls (for tail call optimization)
+// ----------------------------------------------------------------------------
+
+/// Whether `expr` contains a *self tail call*: an application of `self_name`
+/// to exactly `arity` arguments in tail position.
+///
+/// Tail positions follow OCaml's rules: the expression itself, the branches
+/// of an `if`/`match` in tail position, the continuation of a `let` in tail
+/// position, and the final expression of a block in tail position. Nothing
+/// else is scanned (call arguments, operands, `let` right-hand sides, and
+/// nested lambda bodies are never in tail position of this function).
+///
+/// The result is a cheap filter used to decide whether a specialization body
+/// needs the loop skeleton; the lowering in [`super::tail`] re-verifies each
+/// candidate (resolving to the same specialization symbol) before emitting a
+/// backedge, so a false positive here only costs an unused loop header.
+pub(crate) fn has_self_tail_call(
+    expr: &Expr,
+    self_name: &str,
+    arity: usize,
+    inlineable: &std::collections::HashMap<String, Expr>,
+) -> bool {
+    has_self_tail_call_at(expr, self_name, arity, inlineable, false)
+}
+
+/// [`has_self_tail_call`] with `shadowed` tracking whether `self_name` has
+/// been rebound between the function root and `expr` (a shadowed reference
+/// resolves to another binding and is not a self call).
+fn has_self_tail_call_at(
+    expr: &Expr,
+    self_name: &str,
+    arity: usize,
+    inlineable: &std::collections::HashMap<String, Expr>,
+    shadowed: bool,
+) -> bool {
+    match &*expr.e {
+        ENode::IfElse(_, then_branch, else_branch) => {
+            has_self_tail_call_at(then_branch, self_name, arity, inlineable, shadowed)
+                || has_self_tail_call_at(else_branch, self_name, arity, inlineable, shadowed)
+        }
+        ENode::Let(name, _, e2) => {
+            has_self_tail_call_at(e2, self_name, arity, inlineable, shadowed || name == self_name)
+        }
+        ENode::Block(stmts, e) => {
+            let mut shadowed = shadowed;
+            for s in stmts {
+                if let SNode::Decl(e1, _, _) = &*s.s {
+                    if let ENode::Variable(n) = &*e1.e {
+                        shadowed = shadowed || n == self_name;
+                    }
+                }
+            }
+            has_self_tail_call_at(e, self_name, arity, inlineable, shadowed)
+        }
+        ENode::Match(_, cases) => cases.iter().any(|c| {
+            let shadowed =
+                shadowed || pattern_bound_vars(&c.val).iter().any(|n| n == self_name);
+            has_self_tail_call_at(&c.exp, self_name, arity, inlineable, shadowed)
+        }),
+        ENode::Application(..) => {
+            if shadowed {
+                return false;
+            }
+            let (root, args) = application_root(expr, inlineable);
+            root == Some(self_name) && args == arity
+        }
+        _ => false,
+    }
+}
+
+/// The root variable of a flattened application chain `((f a) b)` and the
+/// number of applied arguments, expanding inlineable function-valued `let`
+/// bindings like [`super::apply::collect_application_root`] does.
+fn application_root<'a>(
+    expr: &'a Expr,
+    inlineable: &'a std::collections::HashMap<String, Expr>,
+) -> (Option<&'a str>, usize) {
+    let mut args = 0;
+    let mut current = expr;
+    loop {
+        match &*current.e {
+            ENode::Application(f, _) => {
+                args += 1;
+                current = f;
+            }
+            ENode::Variable(name) => {
+                if let Some(rhs) = inlineable.get(name) {
+                    current = rhs;
+                } else {
+                    return (Some(name), args);
+                }
+            }
+            _ => return (None, args),
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Closures
 // ----------------------------------------------------------------------------
 

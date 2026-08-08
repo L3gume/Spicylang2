@@ -18,7 +18,8 @@
     - [x] Support comments
 - [ ] Pretty-printing of type and AST nodes
     - [x] abstract type variables in types => 'a, 'b, etc. instead of txx
-    - [ ] Display impl for everything in AST
+    - [x] Display impl for everything in AST
+    - [ ] Improve pretty-printing of AST?
 - [x] User-defined enumeration types
 - [x] Pattern Matching on expressions
 - [x] Builtin type to string conversions for print
@@ -37,15 +38,16 @@
 - [x] get rid of REPL, more trouble than worth (or make it useable?)
     * simply ignore it for now I guess
 - [ ] optimizations
-    - [ ] tail call optimization
-    - [ ] bool short-circuiting
+    - [x] tail call optimization (self tail calls lower to loop backedges; mutual/indirect tail calls still grow the stack)
+    - [ ] logic expr short-circuiting
 - [ ] lifetime analysis for memory mgmt with refs like in Rust
 - [ ] str-related builtins
-    - [ ] format (str -> fn (depends on number of format specifiers in input str))
+    - [ ] support cons expression? (char::\[char\])
+    - [ ] format (str -> fn (depends on number of format specifiers in input str)) (probably prelude)
     - [ ] to_chars (str -> list char) builtin
     - [ ] from_chars (list char -> str) builtin
-    - [ ] get_at (int -> str -> option char)
-    - [ ] len (str -> int)
+    - [ ] get_at (int -> str -> option char) (prelude)
+    - [ ] len (str -> int) (prelude)
     - [ ] substr
     - [ ] trim, rtrim, ltrim
     - [ ] whatever else, leverage libc I guess

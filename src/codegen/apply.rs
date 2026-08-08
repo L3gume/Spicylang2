@@ -3,7 +3,7 @@
 
 use crate::ast::*;
 use crate::types::{Monotype, TypeContext, TypeFunc};
-use melior::dialect::{arith, func, llvm, scf};
+use melior::dialect::{arith, func, llvm};
 use melior::ir::{
     Attribute,
     attribute::{
@@ -17,10 +17,13 @@ use melior::ir::{
 use std::collections::{HashMap, HashSet};
 
 use super::{AbstractionInfo, Env, EnvEntry, Module};
-use super::closures::{build_closure, closure_call, env_struct_type, free_variables, load_field};
+use super::closures::{
+    build_closure, closure_call, env_struct_type, free_variables, has_self_tail_call, load_field,
+};
 use super::enums::{build_enum_value, build_payload};
 use super::expr::lower_expr;
 use super::lists::empty_list;
+use super::tail::{TailCtx, lower_tail};
 use super::types::lower_type;
 
 pub(crate) fn lower_let<'c, 'a>(
@@ -30,11 +33,7 @@ pub(crate) fn lower_let<'c, 'a>(
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     env: &mut Env<'c, 'a>,
-    location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
-    if let Some(value) = lower_tail_recursive_let(name, e1, e2, block, module, env, location)? {
-        return Ok(value);
-    }
     let previous = env.get(name).cloned();
     bind_in_env(name, e1, block, module, env)?;
     let result = lower_expr(e2, block, module, env);
@@ -49,132 +48,9 @@ pub(crate) fn lower_let<'c, 'a>(
     result
 }
 
-/// Lower the common tail-recursive closure shape using nested `scf.while`
-/// regions. Captures from the surrounding scope (such as `n` in `tl_fib`)
-/// remain ordinary SSA values visible to both regions.
-fn lower_tail_recursive_let<'c, 'a>(
-    name: &str,
-    function: &Expr,
-    continuation: &Expr,
-    block: &'a Block<'c>,
-    module: &mut Module<'c>,
-    env: &mut Env<'c, 'a>,
-    location: Location<'c>,
-) -> Result<Option<Value<'c, 'a>>, String> {
-    let (params, body) = peel_abstractions(function);
-    if params.len() != 3 {
-        return Ok(None);
-    }
-    let ENode::IfElse(condition, then_branch, else_branch) = &*body.e else {
-        return Ok(None);
-    };
-    let ENode::Variable(then_name) = &*then_branch.e else {
-        return Ok(None);
-    };
-    if then_name != &params[1].0 {
-        return Ok(None);
-    }
-    let (callee, next_args) = flatten_application(else_branch);
-    if callee != name || next_args.len() != 3 {
-        return Ok(None);
-    }
-    let (initial_callee, initial_args) = flatten_application(continuation);
-    if initial_callee != name || initial_args.len() != 3 {
-        return Ok(None);
-    }
-
-    let initial: Vec<Value<'c, 'a>> = initial_args
-        .iter()
-        .map(|arg| lower_expr(arg, block, module, env))
-        .collect::<Result<_, _>>()?;
-    let types: Vec<Type<'c>> = initial.iter().map(|value| value.r#type()).collect();
-
-    let before_block = Block::new(&types.iter().map(|typ| (*typ, location)).collect::<Vec<_>>());
-    let before_values: Vec<Value<'c, '_>> = (0..3)
-        .map(|index| before_block.argument(index).map(Into::into).map_err(|e| e.to_string()))
-        .collect::<Result<_, _>>()?;
-    let mut before_env = env.clone();
-    for (index, (param, _)) in params.iter().enumerate() {
-        before_env.insert(param.clone(), EnvEntry::Value(before_values[index]));
-    }
-    let cond = match &*condition.e {
-        ENode::Comparison(CompOp::Eq, lhs, rhs) => {
-            let lhs = lower_expr(lhs, &before_block, module, &mut before_env)?;
-            let rhs = lower_expr(rhs, &before_block, module, &mut before_env)?;
-            before_block
-                .append_operation(arith::cmpi(
-                    module.context,
-                    arith::CmpiPredicate::Ne,
-                    lhs,
-                    rhs,
-                    location,
-                ))
-                .result(0)
-                .map_err(|e| e.to_string())?
-                .into()
-        }
-        _ => return Ok(None),
-    };
-    before_block.append_operation(scf::condition(cond, &before_values, location));
-    let before_region = Region::new();
-    before_region.append_block(before_block);
-
-    let after_block = Block::new(&types.iter().map(|typ| (*typ, location)).collect::<Vec<_>>());
-    let after_values: Vec<Value<'c, '_>> = (0..3)
-        .map(|index| after_block.argument(index).map(Into::into).map_err(|e| e.to_string()))
-        .collect::<Result<_, _>>()?;
-    let mut after_env = env.clone();
-    for (index, (param, _)) in params.iter().enumerate() {
-        after_env.insert(param.clone(), EnvEntry::Value(after_values[index]));
-    }
-    let next_values: Vec<Value<'c, '_>> = next_args
-        .iter()
-        .map(|arg| lower_expr(arg, &after_block, module, &mut after_env))
-        .collect::<Result<_, _>>()?;
-    after_block.append_operation(scf::r#yield(&next_values, location));
-    let after_region = Region::new();
-    after_region.append_block(after_block);
-
-    let while_op = scf::r#while(&initial, &types, before_region, after_region, location);
-    let while_value = block.append_operation(while_op).result(1).map_err(|e| e.to_string())?;
-    Ok(Some(while_value.into()))
-}
-
-fn peel_abstractions(expr: &Expr) -> (Vec<(String, crate::ast::Type)>, Expr) {
-    let mut params = Vec::new();
-    let mut current = expr.clone();
-    loop {
-        match *current.e {
-            ENode::Abstraction(binding, body) => {
-                params.push((binding.0.clone(), (*binding.1).clone()));
-                current = *body;
-            }
-            _ => return (params, current),
-        }
-    }
-}
-
-fn flatten_application(expr: &Expr) -> (&str, Vec<Expr>) {
-    let mut args = Vec::new();
-    let mut current = expr;
-    loop {
-        match &*current.e {
-            ENode::Application(f, arg) => {
-                args.push((**arg).clone());
-                current = f;
-            }
-            ENode::Variable(name) => {
-                args.reverse();
-                return (name, args);
-            }
-            _ => return ("", Vec::new()),
-        }
-    }
-}
-
 /// All parameter names in a curried abstraction chain `\a => \b => body`,
 /// starting from the first bound name.
-fn abstraction_params(first: &str, body: &Expr) -> Vec<String> {
+pub(crate) fn abstraction_params(first: &str, body: &Expr) -> Vec<String> {
     let mut params = vec![first.to_string()];
     let mut cur = body;
     while let ENode::Abstraction(binding, b) = &*cur.e {
@@ -197,7 +73,7 @@ fn peel_inner(body: &Expr) -> Expr {
 /// self-name) that are bound to runtime values in the current environment.
 /// These must be threaded as leading capture parameters to the lifted
 /// specialization. Returns `(name, MLIR type)` pairs, sorted for determinism.
-fn lambda_captures<'c, 'a>(
+pub(crate) fn lambda_captures<'c, 'a>(
     info: &AbstractionInfo,
     self_name: &str,
     env: &Env<'c, 'a>,
@@ -222,7 +98,11 @@ fn lambda_captures<'c, 'a>(
 
 /// Flatten a left-nested application `((f a) b)` into the root expression and
 /// an ordered argument list, expanding function-valued `let` bindings.
-fn collect_application_root<'a>(expr: &'a Expr, args: &mut Vec<Expr>, module: &Module) -> Expr {
+pub(crate) fn collect_application_root<'a>(
+    expr: &'a Expr,
+    args: &mut Vec<Expr>,
+    module: &Module,
+) -> Expr {
     match &*expr.e {
         ENode::Application(f, arg) => {
             let root = collect_application_root(f, args, module);
@@ -403,7 +283,13 @@ pub(crate) fn lower_variable<'c, 'a>(
 /// emitted exactly once; the cache is populated *before* the body is lowered
 /// so recursive uses of `name` at the same type resolve to the in-progress
 /// symbol.
-fn specialize_binding<'c>(
+///
+/// When the body contains a self tail call (see
+/// [`super::closures::has_self_tail_call`]), it is lowered in tail position
+/// by [`super::tail::lower_tail`]: the entry block doubles as the loop
+/// header and self tail calls become `cf.br` backedges, so the recursion
+/// runs in constant stack space.
+pub(crate) fn specialize_binding<'c>(
     name: &str,
     self_name: &str,
     typ: &Monotype,
@@ -432,7 +318,7 @@ fn specialize_binding<'c>(
     let substitution = crate::types::unify(&info.abs_type, &concrete)
         .map_err(|e| format!("codegen: cannot specialize `{name}`: {}", e.message))?;
     let mut body = info.body.clone();
-    crate::ast::apply_substitution(&mut body, &substitution);
+    crate::types::apply_substitution(&mut body, &substitution);
     let inner_body = peel_inner(&body);
 
     let symbol = format!("{name}_spec_{}", module.spec_counter);
@@ -451,13 +337,29 @@ fn specialize_binding<'c>(
     all_inputs.extend(param_mlirs.iter().copied());
 
     let block = Block::new(&all_inputs.iter().map(|t| (*t, location)).collect::<Vec<_>>());
+
+    // A body with a self tail call is lowered in tail position (see
+    // [`super::tail`]). The region entry block may not have predecessors, so
+    // it trampolines to a separate loop header block with the same argument
+    // list; the parameters and captures bind to the *header's* arguments.
+    let tail_recursive =
+        has_self_tail_call(&inner_body, self_name, params.len(), &module.inlineable);
+    let header = if tail_recursive {
+        Some(Block::new(
+            &all_inputs.iter().map(|t| (*t, location)).collect::<Vec<_>>(),
+        ))
+    } else {
+        None
+    };
+    let body_block = header.as_ref().unwrap_or(&block);
+
     let mut env = HashMap::new();
     for (i, (cname, _)) in captures.iter().enumerate() {
-        let arg: Value<'c, '_> = block.argument(i).map_err(|e| e.to_string())?.into();
+        let arg: Value<'c, '_> = body_block.argument(i).map_err(|e| e.to_string())?.into();
         env.insert(cname.clone(), EnvEntry::Value(arg));
     }
     for (j, p) in params.iter().enumerate() {
-        let arg: Value<'c, '_> = block
+        let arg: Value<'c, '_> = body_block
             .argument(captures.len() + j)
             .map_err(|e| e.to_string())?
             .into();
@@ -467,12 +369,39 @@ fn specialize_binding<'c>(
         env.insert(self_name.to_string(), EnvEntry::Abstraction(name.to_string()));
     }
 
-    let body_value = lower_expr(&inner_body, &block, module, &mut env)?;
-    block.append_operation(func::r#return(&[body_value], location));
+    let pending = if let Some(header) = &header {
+        let mut tail = TailCtx {
+            symbol: symbol.clone(),
+            header,
+            pending: Vec::new(),
+        };
+        lower_tail(&inner_body, header, module, &mut env, &mut tail)?;
+        let entry_args: Vec<Value<'c, '_>> = (0..all_inputs.len())
+            .map(|i| {
+                block
+                    .argument(i)
+                    .map(Into::into)
+                    .map_err(|e: melior::Error| e.to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        block.append_operation(melior::dialect::cf::br(header, &entry_args, location));
+        let TailCtx { pending, .. } = tail;
+        pending
+    } else {
+        let body_value = lower_expr(&inner_body, &block, module, &mut env)?;
+        block.append_operation(func::r#return(&[body_value], location));
+        Vec::new()
+    };
 
     let function_type = FunctionType::new(module.context, &all_inputs, &[ret_mlir]);
     let region = Region::new();
     region.append_block(block);
+    if let Some(header) = header {
+        region.append_block(header);
+    }
+    for pending_block in pending {
+        region.append_block(pending_block);
+    }
 
     let function = func::func(
         module.context,
@@ -521,12 +450,14 @@ pub(crate) fn lower_application<'c, 'a>(
     args.push((*x).clone());
 
     // A known lambda applied to exactly as many arguments as it takes: emit a
-    // multi-argument specialization and call it once.
+    // multi-argument specialization and call it once. The local environment
+    // takes precedence over top-level bindings so a local binding can shadow
+    // a top-level abstraction name.
     if let ENode::Variable(name) = &*root.e {
-        let sym = if module.abstractions.contains_key(name) {
-            Some(name.clone())
-        } else if let Some(EnvEntry::Abstraction(s)) = env.get(name) {
+        let sym = if let Some(EnvEntry::Abstraction(s)) = env.get(name) {
             Some(s.clone())
+        } else if module.abstractions.contains_key(name) {
+            Some(name.clone())
         } else {
             None
         };

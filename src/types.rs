@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::sync::OnceLock;
 use std::collections::{HashMap, HashSet};
 
@@ -23,6 +24,29 @@ pub enum TypeFunc {
 pub enum Monotype {
     TypeVariable(String),
     TypeFuncApplication(Box<TypeFunc>, Vec<Monotype>),
+}
+
+impl Display for Monotype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TypeVariable(var) => write!(f, "TypeVar({})", var),
+            Self::TypeFuncApplication(type_func, monotypes) => {
+                match &**type_func {
+                    TypeFunc::Infer => write!(f, "<infer>"),
+                    TypeFunc::Unit => write!(f, "()"),
+                    TypeFunc::Int => write!(f, "Int"),
+                    TypeFunc::Float => write!(f, "Float"),
+                    TypeFunc::Bool => write!(f, "Bool"),
+                    TypeFunc::Str => write!(f, "Str"),
+                    TypeFunc::Char => write!(f, "Char"),
+                    TypeFunc::Fn => write!(f, "{} -> {}", monotypes[0], monotypes[1]),
+                    TypeFunc::List => write!(f, "list {}", monotypes[0]),
+                    TypeFunc::Enum(n) => write!(f, "{} {}", n,
+                        monotypes.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(" "))
+                }
+            }
+        }
+    }
 }
 
 impl Default for Monotype {
@@ -854,6 +878,149 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
             Ok(combined)
         },
         _ => Err(UnificationError { pos: None, message: format!("Unsupported pattern {:?}", expr) }),
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Statement / program typechecking
+// ----------------------------------------------------------------------------
+
+impl Stmt {
+    pub fn typecheck(&mut self, ctx : &TypeContext) -> Result<(Substitution, Monotype), UnificationError> {
+        let result = (|| -> Result<(Substitution, Monotype), UnificationError> {
+            let mut context = ctx.clone();
+            let (combined, typ) = match &mut *self.s {
+                SNode::Decl(e1, t1, e2) => {
+                    let var_name = match &*e1.e {
+                        ENode::Variable(name) => name.clone(),
+                        _ => return Err(UnificationError { pos: None, message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
+                    };
+                    if TypeContext::is_builtin(&var_name) {
+                        return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
+                    }
+                    let binding_type = type_to_typefn(t1, &mut context)?;
+                    let old_binding = context.get(&var_name);
+                    context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
+                    let (s1, inferred_type) = algo_w(&mut context, e2)?;
+                    let s2 = unify(&binding_type.apply(&s1), &inferred_type)?;
+                    let combined = s1.combine(s2);
+                    context = context.apply(&combined);
+                    match old_binding {
+                        Some(poly) => context.add(var_name.clone(), poly),
+                        None => context.remove(&var_name),
+                    }
+                    let resolved_typ = binding_type.apply(&combined);
+                    let generalized = context.generalise(&resolved_typ);
+                    context.add(var_name, generalized);
+                    self.ctx = context;
+                    (combined, resolved_typ)
+                },
+                SNode::Expr(e1) => {
+                    let (sub, typ) = algo_w(&mut context, e1)?;
+                    self.ctx = context.apply(&sub);
+                    (sub, typ)
+                },
+                SNode::TypeDecl(header, dec) => {
+                    handle_type_decl(header, dec, &mut context)?;
+                    self.ctx = context;
+                    (Substitution::new(), Monotype::unit())
+                }
+            };
+            resolve_stmt_types(self, &combined);
+            Ok((combined, typ))
+        })();
+        result.map_err(|e| e.with_pos(self.pos.clone()))
+    }
+}
+
+impl Program {
+    pub fn typecheck(prog : &mut Program) -> Result<(), UnificationError> {
+        for stmt in prog.stmts.iter_mut() {
+            stmt.typecheck(&prog.ctx)?;
+            prog.ctx = stmt.ctx.clone();
+        }
+        Ok(())
+    }
+}
+
+/// Apply `sub` to the recorded (`algo_w`-annotated) type of every expression
+/// reachable from `stmt`. Runs after a statement is type-checked, once the
+/// statement's full substitution is known, resolving inferred types into
+/// concrete ones. Type variables bound by a generalized `let` are resolved
+/// too: codegen targets monomorphic MLIR, so each instantiation is specialized
+/// at its use site rather than kept polymorphic.
+pub fn resolve_stmt_types(stmt : &mut Stmt, sub : &Substitution) {
+    match &mut *stmt.s {
+        SNode::Decl(e1, _, e2) => {
+            resolve_expr_types(e1, sub);
+            resolve_expr_types(e2, sub);
+        },
+        SNode::Expr(e1) => resolve_expr_types(e1, sub),
+        SNode::TypeDecl(_, _) => {}
+    }
+}
+
+/// Apply `sub` to the recorded type of `expr` and everything reachable from
+/// it. Used by codegen to specialize a lambda body: the definition statement
+/// may leave free type variables (e.g. a recursive use), which the
+/// instantiation's substitution replaces with concrete types.
+pub fn apply_substitution(expr : &mut Expr, sub : &Substitution) {
+    resolve_expr_types(expr, sub);
+}
+
+fn resolve_expr_types(expr : &mut Expr, sub : &Substitution) {
+    expr.typ = expr.typ.apply(sub);
+    match &mut *expr.e {
+        ENode::Variable(_) | ENode::Literal(_) => {}
+        ENode::Abstraction(_, body) => resolve_expr_types(body, sub),
+        ENode::Application(f, x) => {
+            resolve_expr_types(f, sub);
+            resolve_expr_types(x, sub);
+        },
+        ENode::Let(_, e1, e2) => {
+            resolve_expr_types(e1, sub);
+            resolve_expr_types(e2, sub);
+        },
+        ENode::IfElse(c, t, e) => {
+            resolve_expr_types(c, sub);
+            resolve_expr_types(t, sub);
+            resolve_expr_types(e, sub);
+        },
+        ENode::Block(stmts, e) => {
+            for s in stmts.iter_mut() {
+                resolve_stmt_types(s, sub);
+            }
+            resolve_expr_types(e, sub);
+        },
+        ENode::Comparison(_, a, b) => {
+            resolve_expr_types(a, sub);
+            resolve_expr_types(b, sub);
+        },
+        ENode::Arithmetic(_, a, b) => {
+            resolve_expr_types(a, sub);
+            resolve_expr_types(b, sub);
+        },
+        ENode::Logical(_, a, b) => {
+            resolve_expr_types(a, sub);
+            resolve_expr_types(b, sub);
+        },
+        ENode::Unary(_, e) => resolve_expr_types(e, sub),
+        ENode::List(es) => {
+            for e in es.iter_mut() {
+                resolve_expr_types(e, sub);
+            }
+        },
+        ENode::Cons(h, t) => {
+            resolve_expr_types(h, sub);
+            resolve_expr_types(t, sub);
+        },
+        ENode::Match(scrut, cases) => {
+            resolve_expr_types(scrut, sub);
+            for c in cases.iter_mut() {
+                resolve_expr_types(&mut c.val, sub);
+                resolve_expr_types(&mut c.exp, sub);
+            }
+        },
     }
 }
 

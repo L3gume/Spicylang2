@@ -12,3 +12,4 @@ let tl_fib = \(n : int) =>
             loop (i+1) (b) (a+b)
     in loop 0 1 1;
 
+print (itostr (tl_fib 40));
