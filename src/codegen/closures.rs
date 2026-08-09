@@ -169,10 +169,9 @@ fn has_self_tail_call_at(
         ENode::Block(stmts, e) => {
             let mut shadowed = shadowed;
             for s in stmts {
-                if let SNode::Decl(e1, _, _) = &*s.s {
-                    if let ENode::Variable(n) = &*e1.e {
-                        shadowed = shadowed || n == self_name;
-                    }
+                if let SNode::Decl(e1, _, _) = &*s.s
+                && let ENode::Variable(n) = &*e1.e {
+                    shadowed = shadowed || n == self_name;
                 }
             }
             has_self_tail_call_at(e, self_name, arity, inlineable, shadowed)

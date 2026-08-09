@@ -45,9 +45,7 @@ pub(crate) fn lower_expr<'c, 'a>(
     match &*expr.e {
         ENode::Literal(lit) => lower_literal(lit, block, module, location),
         ENode::Variable(_) => lower_variable(expr, block, module, env, location),
-        ENode::Abstraction(binding, body) => {
-            lower_abstraction(expr, binding, body, block, module, env, location)
-        }
+        ENode::Abstraction(binding, body) => lower_abstraction(expr, binding, body, block, module, env, location),
         ENode::Application(f, x) => lower_application(f, x, block, module, env, location),
         ENode::Let(name, e1, e2) => lower_let(name, e1, e2, block, module, env),
         ENode::IfElse(c, t, e) => lower_ifelse(c, t, e, &expr.typ, block, module, env, location),

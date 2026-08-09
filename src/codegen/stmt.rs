@@ -844,16 +844,20 @@ fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
     let i32_type: Type = IntegerType::new(module.context, 32).into();
     let i64_type: Type = IntegerType::new(module.context, 64).into();
 
+    // Ensure extern symbols are loaded and available
     ensure_extern(module, "read", &[i32_type, i64_type, i64_type], &[i64_type])?;
     ensure_extern(module, "strcspn", &[i64_type, i64_type], &[i64_type])?;
 
     let block = Block::new(&[(t.unit, location)]);
 
+    // Allocate buffer for read (1024 bytes)
     let buf = malloc_call(module, &block, 1024, location)?;
     let buf_i64 = ptrtoint_i64(module, &block, buf, location)?;
 
+    // Specify file descriptor (stdin = 0) and buffer size (1023) arguments
     let fd = integer_constant(module, &block, 32, 0, location)?;
     let count = integer_constant(module, &block, 64, 1023, location)?;
+    // Emit call to read external symbol with file descriptor, buffer, and size args
     let call = func::call(
         module.context,
         FlatSymbolRefAttribute::new(module.context, "read"),
@@ -861,6 +865,7 @@ fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
         &[i64_type],
         location,
     );
+    // Map result of call to value n
     let n: Value<'_, '_> = block
         .append_operation(call)
         .result(0)
@@ -870,12 +875,14 @@ fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
     // Clamp to >= 0 so an error (-1) still NUL-terminates within the buffer.
     let zero64 = integer_constant(module, &block, 64, 0, location)?;
     let maxsi = arith::maxsi(n, zero64, location);
+    // Overwrite n as result of Max(n, 0)
     let n: Value<'_, '_> = block
         .append_operation(maxsi)
         .result(0)
         .map_err(|e| e.to_string())?
         .into();
 
+    // Set buf[n] to 0 to ensure buffer is always null-terminated
     let n_addr = arith::addi(buf_i64, n, location);
     let n_addr: Value<'_, '_> = block
         .append_operation(n_addr)
@@ -901,6 +908,7 @@ fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
         LoadStoreOptions::new(),
     ));
 
+    // Use strcspn to get length of string up to LF (\n)
     let nl = lower_string("\n", &block, module, location)?;
     let nl_i64 = ptrtoint_i64(module, &block, nl, location)?;
     let call = func::call(
@@ -916,6 +924,8 @@ fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .into();
 
+    // Store string without \n to memory
+    // Do this by overwriting \n char with \0
     let end_addr = arith::addi(buf_i64, end, location);
     let end_addr: Value<'_, '_> = block
         .append_operation(end_addr)
@@ -931,12 +941,14 @@ fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
         LoadStoreOptions::new(),
     ));
 
+    // Emit return of the read buffer
     block.append_operation(func::r#return(&[buf], location));
 
     let function_type = FunctionType::new(module.context, &[t.unit], &[t.string]);
     let region = Region::new();
     region.append_block(block);
 
+    // Create builtin readin function and add to module object for later use
     let function = func::func(
         module.context,
         StringAttribute::new(module.context, "readin"),
@@ -1067,8 +1079,6 @@ pub fn lower_decl<'a>(
         return Ok(());
     }
 
-    let location = Location::unknown(module.context);
-
     // An unannotated binding carries `infer`; its result type is taken from
     // the initializer's lowered value instead.
     let declared_type = match &typ.t {
@@ -1081,7 +1091,7 @@ pub fn lower_decl<'a>(
     let block = Block::new(&[]);
     let mut env = HashMap::new();
     let value = lower_expr(e2, &block, module, &mut env)?;
-    block.append_operation(func::r#return(&[value], location));
+    block.append_operation(func::r#return(&[value], module.location(&e2.pos)));
 
     let result_type = match declared_type {
         Some(t) => t,
@@ -1101,7 +1111,7 @@ pub fn lower_decl<'a>(
             Identifier::new(module.context, "llvm.emit_c_interface"),
             Attribute::unit(module.context),
         )],
-        location,
+        module.location(&e1.pos),
     );
     module.module.body().append_operation(function);
     module.symbols.insert(name.clone(), function_type);

@@ -86,10 +86,9 @@ pub(crate) fn lambda_captures<'c, 'a>(
         if fv == self_name || params.contains(&fv) {
             continue;
         }
-        if let Some(EnvEntry::Value(v)) = env.get(&fv) {
-            if !caps.iter().any(|(n, _)| n == &fv) {
-                caps.push((fv.clone(), v.r#type()));
-            }
+        if let Some(EnvEntry::Value(v)) = env.get(&fv) 
+        && !caps.iter().any(|(n, _)| n == &fv) {
+            caps.push((fv.clone(), v.r#type()));
         }
     }
     caps.sort_by(|a, b| a.0.cmp(&b.0));
@@ -98,8 +97,8 @@ pub(crate) fn lambda_captures<'c, 'a>(
 
 /// Flatten a left-nested application `((f a) b)` into the root expression and
 /// an ordered argument list, expanding function-valued `let` bindings.
-pub(crate) fn collect_application_root<'a>(
-    expr: &'a Expr,
+pub(crate) fn collect_application_root(
+    expr: &Expr,
     args: &mut Vec<Expr>,
     module: &Module,
 ) -> Expr {
@@ -225,11 +224,9 @@ pub(crate) fn lower_variable<'c, 'a>(
 
     // A nullary enum constructor (`None`) builds a tagged value with no
     // payload.
-    if let Some(&(_, variant_index, arity)) = module.constructors.get(name) {
-        if arity == 0 {
-            let payload = empty_list(block, module, location)?;
-            return build_enum_value(module, block, variant_index, payload, location);
-        }
+    if let Some(&(_, variant_index, arity)) = module.constructors.get(name) && arity == 0 {
+        let payload = empty_list(block, module, location)?;
+        return build_enum_value(module, block, variant_index, payload, location);
     }
 
     let function_type = module.symbols.get(name).ok_or_else(|| {
@@ -342,9 +339,7 @@ pub(crate) fn specialize_binding<'c>(
     // [`super::tail`]). The region entry block may not have predecessors, so
     // it trampolines to a separate loop header block with the same argument
     // list; the parameters and captures bind to the *header's* arguments.
-    let tail_recursive =
-        has_self_tail_call(&inner_body, self_name, params.len(), &module.inlineable);
-    let header = if tail_recursive {
+    let header = if has_self_tail_call(&inner_body, self_name, params.len(), &module.inlineable) {
         Some(Block::new(
             &all_inputs.iter().map(|t| (*t, location)).collect::<Vec<_>>(),
         ))
@@ -429,18 +424,17 @@ pub(crate) fn lower_application<'c, 'a>(
 ) -> Result<Value<'c, 'a>, String> {
 
     // A single-argument constructor application `Some x`.
-    if let ENode::Variable(name) = &*f.e {
-        if let Some(&(_, variant_index, arity)) = module.constructors.get(name) {
-            if arity != 1 {
-                return Err(format!(
-                    "codegen: constructor `{name}` applied to the wrong number of arguments"
-                ));
-            }
-            let value = lower_expr(x, block, module, env)?;
-            let typ = lower_type(&default_free_vars(&x.typ), module)?;
-            let payload = build_payload(module, block, &[(value, typ)], location)?;
-            return build_enum_value(module, block, variant_index, payload, location);
+    if let ENode::Variable(name) = &*f.e 
+    && let Some(&(_, variant_index, arity)) = module.constructors.get(name) {
+        if arity != 1 {
+            return Err(format!(
+                "codegen: constructor `{name}` applied to the wrong number of arguments"
+            ));
         }
+        let value = lower_expr(x, block, module, env)?;
+        let typ = lower_type(&default_free_vars(&x.typ), module)?;
+        let payload = build_payload(module, block, &[(value, typ)], location)?;
+        return build_enum_value(module, block, variant_index, payload, location);
     }
 
     // Flatten `(((f a) b) c)` into a root and an ordered argument list,
@@ -461,25 +455,11 @@ pub(crate) fn lower_application<'c, 'a>(
         } else {
             None
         };
-        if let Some(sym) = sym {
-            if let Some(info) = module.abstractions.get(&sym) {
-                let info = info.clone();
-                let params = abstraction_params(&info.param, &info.body);
-                if args.len() == params.len() {
-                    return lower_full_application(
-                        &sym,
-                        name,
-                        &info,
-                        &root.typ,
-                        &params,
-                        &args,
-                        block,
-                        module,
-                        env,
-                        location,
-                    );
-                }
-                return lower_partial_application(
+        if let Some(sym) = sym && let Some(info) = module.abstractions.get(&sym) {
+            let info = info.clone();
+            let params = abstraction_params(&info.param, &info.body);
+            if args.len() == params.len() {
+                return lower_full_application(
                     &sym,
                     name,
                     &info,
@@ -492,6 +472,18 @@ pub(crate) fn lower_application<'c, 'a>(
                     location,
                 );
             }
+            return lower_partial_application(
+                &sym,
+                name,
+                &info,
+                &root.typ,
+                &params,
+                &args,
+                block,
+                module,
+                env,
+                location,
+            );
         }
     }
 
@@ -942,6 +934,7 @@ pub(crate) fn lower_abstraction<'c, 'a>(
     }
 }
 
+/// SSA => Static Single Assignment
 /// Lower a literal to an `arith.constant`, returning its SSA value.
 pub(crate) fn lower_literal<'c, 'a>(
     lit: &Lit,
@@ -974,6 +967,7 @@ pub(crate) fn lower_literal<'c, 'a>(
                     BoolAttribute::new(module.context, *value).into(),
                     location,
                 ),
+                // Unit is treated as i32
                 Lit::Unit => arith::constant(
                     module.context,
                     IntegerAttribute::new(IntegerType::new(module.context, 32).into(), 0).into(),
