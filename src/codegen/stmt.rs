@@ -194,7 +194,7 @@ impl<'a> BuiltinTypes<'a> {
 
 /// Append `llvm.ptrtoint %value : !llvm.ptr to i64` to `block`, matching the
 /// `i64` argument convention used for every external libc call.
-fn ptrtoint_i64<'a, 'b>(
+pub(crate) fn ptrtoint_i64<'a, 'b>(
     module: &Module<'a>,
     block: &'b Block<'a>,
     value: Value<'a, 'b>,
@@ -214,7 +214,7 @@ fn ptrtoint_i64<'a, 'b>(
 
 /// Append `llvm.inttoptr %value : i64 to !llvm.ptr` to `block`, converting a
 /// byte address (e.g. `buf + offset`) back into a pointer for a store.
-fn inttoptr_ptr<'a, 'b>(
+pub(crate) fn inttoptr_ptr<'a, 'b>(
     module: &Module<'a>,
     block: &'b Block<'a>,
     value: Value<'a, 'b>,
@@ -969,7 +969,7 @@ fn emit_readin<'a>(module: &mut Module<'a>) -> Result<(), String> {
 /// `sprintf`, `atoi`, ...). Each is declared at most once per module, marked
 /// `private`, and uses only built-in types so the `func_to_llvm` pass converts
 /// it cleanly. Pointer arguments are passed as `i64` (via `llvm.ptrtoint`).
-fn ensure_extern<'a>(
+pub(crate) fn ensure_extern<'a>(
     module: &mut Module<'a>,
     name: &str,
     inputs: &[Type<'a>],

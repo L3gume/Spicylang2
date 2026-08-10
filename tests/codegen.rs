@@ -366,6 +366,38 @@ fn escaped_string_literal_runs() {
 }
 
 #[test]
+fn string_concat_basic() {
+    match run(r#""hello" + " world";"#, false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "hello world"),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_concat_empty_lhs() {
+    match run(r#"let empty = ""; empty + "world";"#, false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "world"),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_concat_empty_rhs() {
+    match run(r#"let empty = ""; "hello" + empty;"#, false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, "hello"),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_concat_both_empty() {
+    match run(r#"let e = ""; e + e;"#, false) {
+        Ok(codegen::ExecutionResult::String(s)) => assert_eq!(s, ""),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
 fn ftoi_builtin_runs() {
     // `ftoi` truncates toward zero.
     match run("ftoi 3.9;", false) {

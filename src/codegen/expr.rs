@@ -1,10 +1,12 @@
 //! Expression lowering.
 
 use crate::ast::*;
+use crate::codegen::lists::ensure_malloc;
 use crate::types::{Monotype, TypeFunc};
-use melior::dialect::{arith, scf};
+use melior::dialect::{arith, func, scf};
+use melior::ir::ValueLike;
 use melior::ir::{
-    attribute::{BoolAttribute, IntegerAttribute},
+    attribute::{BoolAttribute, FlatSymbolRefAttribute, IntegerAttribute},
     operation::OperationBuilder,
     r#type::IntegerType,
     Block, BlockLike, Location, Operation, Region, RegionLike, Type, Value,
@@ -19,7 +21,8 @@ use super::apply::{
 use super::enums::{
     PatternBind, destructure_pattern, enum_disc_eq, enum_variant_fields,
 };
-use super::lists::{list_elem, list_is_null, lower_cons, lower_list};
+use super::lists::{list_elem, list_is_null, lower_cons, lower_list, integer_constant};
+use super::stmt::{ensure_extern, ptrtoint_i64, inttoptr_ptr};
 use super::types::lower_type;
 
 // ----------------------------------------------------------------------------
@@ -148,12 +151,95 @@ fn lower_arith<'c, 'a>(
     let lhs = lower_expr(e1, block, module, env)?;
     let rhs = lower_expr(e2, block, module, env)?;
 
+    if matches!((op, primitive_kind(&e1.typ)?), (ArithOp::Plus, Prim::Str)) {
+        let i64_type: Type = IntegerType::new(module.context, 64).into();
+        ensure_malloc(module)?;
+        ensure_extern(module, "strlen", &[i64_type], &[i64_type])?;
+        ensure_extern(module, "strcpy", &[i64_type, i64_type], &[i64_type])?;
+        ensure_extern(module, "strcat", &[i64_type, i64_type], &[i64_type])?;
+
+        let lhs_i64 = ptrtoint_i64(module, block, lhs, location)?;
+        let rhs_i64 = ptrtoint_i64(module, block, rhs, location)?;
+
+        let lhs_len_call = func::call(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, "strlen"),
+            &[lhs_i64],
+            &[i64_type],
+            lhs.location()
+        );
+        let rhs_len_call = func::call(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, "strlen"),
+            &[rhs_i64],
+            &[i64_type],
+            rhs.location()
+        );
+
+        let lhs_len: Value<'_, '_> = block
+            .append_operation(lhs_len_call)
+            .result(0)
+            .map_err(|e| e.to_string())?
+            .into();
+        let rhs_len: Value<'_, '_> = block
+            .append_operation(rhs_len_call)
+            .result(0)
+            .map_err(|e| e.to_string())?
+            .into();
+        let total = block
+            .append_operation(arith::addi(lhs_len, rhs_len, location))
+            .result(0)
+            .map_err(|e| e.to_string())?
+            .into();
+        let one_i64 = integer_constant(module, block, 64, 1, location)?;
+        let add_one = arith::addi(total, one_i64, location);
+        let terminated_len: Value<'_, '_> = block
+            .append_operation(add_one)
+            .result(0)
+            .map_err(|e| e.to_string())
+            .map(Into::into)?;
+        let malloc_call_op = func::call(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, "malloc"),
+            &[terminated_len],
+            &[i64_type],
+            location,
+        );
+        let buf_i64: Value<'_, '_> = block
+            .append_operation(malloc_call_op)
+            .result(0)
+            .map_err(|e| e.to_string())
+            .map(Into::into)?;
+        let strcpy_call = func::call(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, "strcpy"),
+            &[buf_i64, lhs_i64],
+            &[i64_type],
+            lhs.location()
+        );
+        let dest = block
+            .append_operation(strcpy_call)
+            .result(0)
+            .map_err(|e| e.to_string())
+            .map(Into::into)?;
+        let strcat_call = func::call(
+            module.context,
+            FlatSymbolRefAttribute::new(module.context, "strcat"),
+            &[dest, rhs_i64],
+            &[i64_type],
+            location,
+        );
+        let raw_i64: Value<'_, '_> = block
+            .append_operation(strcat_call)
+            .result(0)
+            .map_err(|e| e.to_string())
+            .map(Into::into)?;
+        return inttoptr_ptr(module, block, raw_i64, location);
+    }
+
     let op_name = match (op, primitive_kind(&e1.typ)?) {
         (ArithOp::Plus, Prim::Int) => "arith.addi",
         (ArithOp::Plus, Prim::Float) => "arith.addf",
-        (ArithOp::Plus, Prim::Str) => {
-            return Err("codegen: string concatenation not implemented".to_string())
-        }
         (ArithOp::Minus, Prim::Int) => "arith.subi",
         (ArithOp::Minus, Prim::Float) => "arith.subf",
         (ArithOp::Times, Prim::Int) => "arith.muli",
