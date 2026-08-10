@@ -227,7 +227,8 @@ fn lower_comparison<'c, 'a>(
         .map(Into::into)
 }
 
-/// Lower `a OP b` to `arith.andi` / `arith.ori` / `arith.xori` (i1).
+/// Lower `a && b`/`a || b` with short-circuit evaluation via `scf.if`,
+/// and `a ^ b` to `arith.xori`.
 fn lower_logical<'c, 'a>(
     op: &LogicalOp,
     e1: &Expr,
@@ -237,15 +238,40 @@ fn lower_logical<'c, 'a>(
     env: &mut Env<'c, 'a>,
     location: Location<'c>,
 ) -> Result<Value<'c, 'a>, String> {
+    let bool_type: Type<'c> = IntegerType::new(module.context, 1).into();
     let lhs = lower_expr(e1, block, module, env)?;
-    let rhs = lower_expr(e2, block, module, env)?;
-    let op_name = match op {
-        LogicalOp::And => "arith.andi",
-        LogicalOp::Or => "arith.ori",
-        LogicalOp::Xor => "arith.xori",
+
+    if matches!(op, LogicalOp::Xor) {
+        let rhs = lower_expr(e2, block, module, env)?;
+        return block
+            .append_operation(arith_binop("arith.xori", lhs, rhs, location)?)
+            .result(0)
+            .map_err(|e| e.to_string())
+            .map(Into::into);
+    }
+
+    let mut e2_env = env.clone();
+    let e2_block = Block::new(&[]);
+    let e2_val = lower_expr(e2, &e2_block, module, &mut e2_env)?;
+    e2_block.append_operation(scf::r#yield(&[e2_val], location));
+    let e2_region = Region::new();
+    e2_region.append_block(e2_block);
+
+    let const_val = matches!(op, LogicalOp::Or);
+    let const_block = Block::new(&[]);
+    let c = bool_constant(module, &const_block, const_val, location)?;
+    const_block.append_operation(scf::r#yield(&[c], location));
+    let const_region = Region::new();
+    const_region.append_block(const_block);
+
+    let (then_region, else_region) = if matches!(op, LogicalOp::And) {
+        (e2_region, const_region)
+    } else {
+        (const_region, e2_region)
     };
+
     block
-        .append_operation(arith_binop(op_name, lhs, rhs, location)?)
+        .append_operation(scf::r#if(lhs, &[bool_type], then_region, else_region, location))
         .result(0)
         .map_err(|e| e.to_string())
         .map(Into::into)
