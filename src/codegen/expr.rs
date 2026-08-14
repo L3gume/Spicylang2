@@ -60,6 +60,9 @@ pub(crate) fn lower_expr<'c, 'a>(
         ENode::Unary(op, e) => lower_unary(op, e, block, module, env, location),
         ENode::List(es) => lower_list(es, block, module, env, location),
         ENode::Cons(h, t) => lower_cons(h, t, block, module, env, location),
+        ENode::FieldAccess(expr, expr1) => todo!(),
+        ENode::Record(rec_name, field_assns) => todo!(),
+        ENode::With(expr, field_assns) => todo!(),
     }
 }
 

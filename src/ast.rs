@@ -191,22 +191,25 @@ pub struct Binding(pub String, pub Box<Type>);
 
 impl Display for Binding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, {})", self.0, self.1)
+        write!(f, "({} : {})", self.0, self.1)
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeDec {
     Alias(Box<Type>),
-    Enum(Vec<Variant>)
+    Enum(Vec<Variant>),
+    Record(Vec<Binding>)
 }
 
 impl Display for TypeDec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Alias(t) => write!(f, "Alias({})", t),
-            Self::Enum(variants) => write!(f, "Enum(\n{}\n)",
+            Self::Enum(variants) => write!(f, "Enum({})",
                 variants.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")),
+            Self::Record(fields) => write!(f, "Record({})",
+                fields.iter().map(|b| b.to_string()).collect::<Vec<_>>().join("\n"))
         }
     }
 }
@@ -303,7 +306,11 @@ pub enum ENode {
     Unary(UnaryOp, Box<Expr>),
     List(Vec<Expr>),
     Cons(Box<Expr>, Box<Expr>),
-    Match(Box<Expr>, Vec<MatchCase>)
+    Match(Box<Expr>, Vec<MatchCase>),
+    FieldAccess(Box<Expr>, String),
+    Record(String, Vec<FieldAssn>),
+    With(Box<Expr>, Vec<FieldAssn>)
+    
 }
 
 impl Display for ENode {
@@ -323,6 +330,9 @@ impl Display for ENode {
             ENode::List(exprs) => write!(f, "List({})", exprs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")),
             ENode::Cons(expr, expr1) => write!(f, "Cons({}, {})", expr, expr1),
             ENode::Match(expr, match_cases) => write!(f, "Match({}, {})", expr, match_cases.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")),
+            ENode::FieldAccess(expr, expr1) => todo!(),
+            ENode::Record(rec_name, field_assns) => todo!(),
+            ENode::With(expr, field_assns) => todo!(),
         }
     }
 }
@@ -330,6 +340,12 @@ impl Display for ENode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchCase {
     pub val : Box<Expr>,
+    pub exp : Box<Expr>
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldAssn {
+    pub field: String,
     pub exp : Box<Expr>
 }
 
@@ -450,6 +466,9 @@ fn fill_expr_positions(expr : &mut Expr, index : &LineIndex) {
                 fill_expr_positions(&mut c.exp, index);
             }
         },
+        ENode::FieldAccess(expr, expr1) => todo!(),
+        ENode::Record(rec_name, field_assns) => todo!(),
+        ENode::With(expr, field_assns) => todo!(),
     }
 }
 

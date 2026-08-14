@@ -136,6 +136,14 @@ let all = \pred ls => match ls
     | [] => true
     | x::xs => (pred x) && (all pred xs);
 
+let find = \pred ls => match ls
+    | [] => None
+    | x::xs => (if pred x then Some x else find pred xs);
+
+let find_val = \val ls => match ls
+    | [] => None
+    | x::xs => (if x == val then Some x else find val xs);
+
 # tail-recursive filter
 let tfilter = \pred ls =>
     let aux = (\acc ls => match ls

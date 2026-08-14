@@ -1,0 +1,21 @@
+record Foo =
+    {
+        bar : int,
+        baz : option str
+    };
+
+record Poly('a) =
+    {
+        bar : 'a
+    };
+
+let x = Foo { bar: 69, baz: Some "420" };
+
+let num = x.bar;
+let string = match x.baz
+    | Some s => s
+    | None => "";
+
+let match_foo = \rec => match rec
+    | Foo { bar: n, baz: opt } => true
+    | _ => false;

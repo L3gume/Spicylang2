@@ -96,6 +96,9 @@ pub(crate) fn free_variables(expr: &Expr) -> HashSet<String> {
             }
             fv
         }
+        ENode::FieldAccess(expr, expr1) => todo!(),
+        ENode::Record(rec_name, field_assns) => todo!(),
+        ENode::With(expr, field_assns) => todo!(),
     }
 }
 

@@ -61,7 +61,8 @@ BuiltinType: Box<Type> = {
 
 TypeDecl: Stmt = {
     <start:@L> "type" <h:TypeHeader> <t:Type> <end:@R>              => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::TypeDecl(h, Box::new(TypeDec::Alias(t)))),
-    <start:@L> "enum "<h:TypeHeader> <vs:Pipe<Variant>> <end:@R>    => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::TypeDecl(h, Box::new(TypeDec::Enum(vs))))
+    <start:@L> "enum "<h:TypeHeader> <vs:Pipe<Variant>> <end:@R>    => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::TypeDecl(h, Box::new(TypeDec::Enum(vs)))),
+    <start:@L> "record" <h:TypeHeader> "{" <fs:CommaOne<TypedBinding>> "}" <end:@R> => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::TypeDecl(h, Box::new(TypeDec::Record(fs))))
 }
 
 TypeHeader: TypeHeader = {
@@ -101,8 +102,7 @@ pub Stmt: Stmt = {
 BlockStmt: Stmt = {
     <start:@L> "let" <n:Name> ":" <t:Type> "=" <e:Expr> <end:@R>    => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::Decl(Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Variable(n))), t, e)),
     <start:@L> "let" <n:Name> "=" <e:Expr> <end:@R>                 => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::Decl(Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Variable(n))), Box::new(Type { t : Monotype::infer() }), e)),
-    <start:@L> <e:Expr> <end:@R>                                    => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::Expr(e)),
-};
+    <start:@L> <e:Expr> <end:@R>                                    => Stmt::at(Pos::bytes(start as u32, end as u32), SNode::Expr(e)), };
 
 // Zero or more BlockStmt;s for the statement prefix of a block expression.
 BlkBody: Vec<Stmt> = {
@@ -115,37 +115,59 @@ BlkBody: Vec<Stmt> = {
 // ----------------------------------------------------------------------------
 
 // Precedence cascade: lowest to highest
-//   LogExpr < CmpExpr < AddExpr < MulExpr < UnaryExpr < AppExpr < Atom
-// `::` is right-associative and sits between the cascade and the top level.
-// Its left operand is a *non-binary* expression (unary/app/atom/block/list),
-// so a binary expression on the left requires parens: `(a + b) :: c`.
+//   LogExpr < CmpExpr < AddExpr < MulExpr < UnaryExpr < AppExpr < Atom < PostfixExpr
+// `::` is right-associative (ConsExpr) and sits between the cascade and the top
+// level; its left operand is a *non-binary* expression (ConsOperand), so a
+// binary expression on the left requires parens: `(a + b) :: c`.
+// Record literals (`Name { .. }`), `with` updates, and blocks sit at ExprBase,
+// one step below the operator cascade. Field access (`.`) sits below
+// application (PostfixExpr), so `f x.y` = `f (x.y)` and `(f x).y` needs parens.
 
 pub Expr: Box<Expr> = {
-    Abs_Expr                                            => <>,
+    Abs_Expr                                                                => <>,
     <start:@L> "let" <n:Name> "=" <e1:Expr> "in" <e2:Expr> <end:@R>         => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Let(n, e1, e2))),
     <start:@L> "if" <c:Expr> "then" <e1:Expr> "else" <e2:Expr> <end:@R>     => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::IfElse(c, e1, e2))),
     <start:@L> "match" <e:ConsExpr> "|" <cs:Pipe<MatchCase>> <end:@R>       => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Match(e, cs))),
-    ConsExpr                                            => <>,
+    ConsExpr                                                                => <>,
 };
 
 MatchCase: MatchCase = {
-    <v:ConsExpr> "=>" <e:ConsExpr>                      => MatchCase{ val: v, exp: e }
+    <v:ConsExpr> "=>" <e:ConsExpr>                                          => MatchCase{ val: v, exp: e }
 };
 
 ConsExpr: Box<Expr> = {
-    ExprBase                                            => <>,
+    ExprBase                                                                => <>,
     <start:@L> <e1:ConsOperand> "::" <e2:ConsExpr> <end:@R>                 => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Cons(e1, e2))),
 };
 
 ConsOperand: Box<Expr> = {
-    UnaryExpr                                           => <>,
-    <start:@L> "{" <ss:BlkBody> <e:Expr> "}" <end:@R>                       => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Block(ss, e))),
+    UnaryExpr                                                               => <>,
+    Block                                                                   => <>
 };
 
 ExprBase: Box<Expr> = {
-    LogExpr                                             => <>,
-    <start:@L> "{" <ss:BlkBody> <e:Expr> "}" <end:@R>                       => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Block(ss, e))),
+    LogExpr                                                                 => <>,
+    <start:@L> <n:Name> <fs:RecordBody> <end:@R>                            => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Record(n, fs))),
+    <start:@L> <e:WithOperand> "with" <fs:RecordBody> <end:@R>              => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::With(e, fs))),
+    Block                                                                   => <>
 };
+
+WithOperand: Box<Expr> = {
+    PostfixExpr                                                             => <>,
+    Block                                                                   => <>
+}
+
+Block: Box<Expr> = {
+    <start:@L> "{" <ss:BlkBody> <e:Expr> "}" <end:@R>                       => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Block(ss, e))),
+}
+
+RecordBody: Vec<FieldAssn> = {
+    "{" <fs:CommaOne<FieldAssn>> "}" => fs
+}
+
+FieldAssn: FieldAssn = {
+    <n:Name> ":" <e:Expr>                                                   => FieldAssn{ field: n, exp: e }
+}
 
 // Multi-binder sugar: `\x y z => body` desugars to `\x => \y => \z => body`.
 // Explicit nested abstractions still parse (body is a full Expr).
@@ -207,16 +229,25 @@ AppExpr: Box<Expr> = {
 
 // --- Atoms (primary expressions) ---
 Atom: Box<Expr> = {
-    <start:@L> <n:Name> <end:@R>                        => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Variable(n))),
     <start:@L> <l:Literal> <end:@R>                     => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Literal(l))),
     <start:@L> "[" "]" <end:@R>                         => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::List(vec![]))),
     <start:@L> "[" <es:CommaOne<Expr>> "]" <end:@R>     => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::List(es.into_iter().map(|b| *b).collect()))),
-    "(" <e:Expr> ")"            => e
+    PostfixExpr                                         => <>
 };
 
+PostfixExpr: Box<Expr> = {
+    <start:@L> <n:Name> <end:@R>                        => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Variable(n))),
+    <start:@L> <e:PostfixExpr> "." <n:Name> <end:@R>    => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::FieldAccess(e, n))),
+    "(" <e:Expr> ")"                                    => e
+}
+
 Binding: Box<Binding> = {
-    Name                            => Box::new(Binding(<>, Box::new(Type { t: Monotype::infer() }))),
-    "(" <n:Name> ":" <t:Type> ")"   => Box::new(Binding(n, t)),
+    Name                      => Box::new(Binding(<>, Box::new(Type { t: Monotype::infer() }))),
+    "(" <b:TypedBinding> ")"  => Box::new(b),
+}
+
+TypedBinding : Binding = {
+    <n:Name> ":" <t:Type> => Binding(n, t)
 }
 
 Name: String = {

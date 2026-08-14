@@ -1,3 +1,4 @@
+use core::panic;
 use std::fmt::Display;
 use std::sync::OnceLock;
 use std::collections::{HashMap, HashSet};
@@ -17,7 +18,8 @@ pub enum TypeFunc {
     Char,
     Fn, // ->
     List,
-    Enum(String)
+    Enum(String),
+    Record(String)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,7 +44,9 @@ impl Display for Monotype {
                     TypeFunc::Fn => write!(f, "{} -> {}", monotypes[0], monotypes[1]),
                     TypeFunc::List => write!(f, "list {}", monotypes[0]),
                     TypeFunc::Enum(n) => write!(f, "{} {}", n,
-                        monotypes.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(" "))
+                        monotypes.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(" ")),
+                    TypeFunc::Record(n) => write!(f, "{}{{{}}}", n,
+                        monotypes.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")),
                 }
             }
         }
@@ -153,6 +157,10 @@ impl Monotype {
             _ => panic!("enum_apply: expected an enum application"),
         }
     }
+
+    pub fn record(name : String, vars : Vec<Monotype>) -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Record(name)), vars)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -249,11 +257,19 @@ pub struct TypeAlias {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RecordSignature {
+    pub params : Vec<String>,
+    pub fields : Vec<(String, Monotype)>
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypeContext {
     type_var_ctr : u32,
     pub variables : HashMap<String, Polytype>,
     type_aliases : HashMap<String, TypeAlias>,
-    enum_names : HashSet<String>
+    enum_names : HashSet<String>,
+    record_names : HashSet<String>,
+    record_signatures: HashMap<String, RecordSignature>
 }
 
 impl Default for TypeContext {
@@ -264,7 +280,14 @@ impl Default for TypeContext {
 
 impl TypeContext {
     pub fn new() -> TypeContext {
-        let mut ctx = TypeContext { type_var_ctr : 0, variables : HashMap::new(), type_aliases : HashMap::new(), enum_names : HashSet::new() };
+        let mut ctx = TypeContext {
+            type_var_ctr : 0,
+            variables : HashMap::new(),
+            type_aliases : HashMap::new(),
+            enum_names : HashSet::new(),
+            record_names: HashSet::new(),
+            record_signatures: HashMap::new()
+        };
         for (name, poly) in builtins() {
             ctx.variables.insert(name.clone(), poly.clone());
         }
@@ -272,7 +295,14 @@ impl TypeContext {
     }
 
     pub fn make(map: HashMap<String, Polytype>) -> TypeContext {
-        TypeContext { type_var_ctr : 0, variables : map, type_aliases : HashMap::new(), enum_names : HashSet::new() }
+        TypeContext { 
+            type_var_ctr : 0,
+            variables : map,
+            type_aliases : HashMap::new(),
+            enum_names : HashSet::new(),
+            record_names: HashSet::new(),
+            record_signatures: HashMap::new(),
+        }
     }
 
     pub fn get(&self, name : &String) -> Option<Polytype> {
@@ -303,8 +333,24 @@ impl TypeContext {
         self.enum_names.contains(name)
     }
 
+    pub fn has_record_name(&self, name : &str) -> bool {
+        self.record_names.contains(name)
+    }
+
+    pub fn add_record_signature(&mut self, rec_name : String, sig : RecordSignature) {
+        self.record_names.insert(rec_name.clone());
+        self.record_signatures.insert(rec_name, sig);
+    }
+
     pub fn apply(&self, sub : &Substitution) -> TypeContext {
-        TypeContext { type_var_ctr: self.type_var_ctr, variables: self.variables.iter().map(|(k, t)| (k.clone(), t.apply(sub))).collect(), type_aliases: self.type_aliases.clone(), enum_names: self.enum_names.clone() }
+        TypeContext {
+            type_var_ctr: self.type_var_ctr,
+            variables: self.variables.iter().map(|(k, t)| (k.clone(), t.apply(sub))).collect(),
+            type_aliases: self.type_aliases.clone(),
+            enum_names: self.enum_names.clone(),
+            record_names: self.record_names.clone(),
+            record_signatures: self.record_signatures.clone(),
+        }
     }
 
     pub fn new_typevar(&mut self) -> String {
@@ -457,6 +503,7 @@ fn check_undeclared(typ : &Monotype, declared : &[String]) -> Result<(), Unifica
     }
 }
 
+// TODO:: need to handle position of errors
 pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut TypeContext) -> Result<(), UnificationError> {
     let mut mapping : HashMap<String, Monotype> = HashMap::new();
     let mut fresh_vars : Vec<Monotype> = Vec::new();
@@ -468,14 +515,17 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
         fresh_vars.push(fresh);
         fresh_names.push(fresh_name);
     }
+    if context.get_alias(&header.n).is_some() {
+        return Err(UnificationError { pos: None, message: format!("Type alias `{}` is already declared", header.n) });
+    }
+    if context.has_enum_name(&header.n) {
+        return Err(UnificationError { pos: None, message: format!("`{}` is already declared as an enum", header.n) });
+    }
+    if context.has_record_name(&header.n) {
+        return Err(UnificationError { pos: None, message: format!("Record `{}` is already declared", header.n) });
+    }
     match dec {
         TypeDec::Enum(variants) => {
-            if context.get_alias(&header.n).is_some() {
-                return Err(UnificationError { pos: None, message: format!("`{}` is already declared as a type alias", header.n) });
-            }
-            if context.has_enum_name(&header.n) {
-                return Err(UnificationError { pos: None, message: format!("Enum `{}` is already declared", header.n) });
-            }
             context.add_enum_name(header.n.clone());
             let enum_typ = Monotype::enum_app(header.n.clone(), fresh_vars);
             for variant in variants {
@@ -490,13 +540,20 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
                 context.add(variant.n.clone(), generalized);
             }
         },
+        TypeDec::Record(fields) => {
+            let mut sig_fields = Vec::new();
+            for field in fields {
+                let inst = field.1.t.instantiate(&mut mapping);
+                let expanded = expand(&inst, context, &mut Vec::new())?;
+                check_undeclared(&expanded, &fresh_names)?;
+                sig_fields.push((field.0.clone(), expanded));
+            }
+            context.add_record_signature(header.n.clone(), RecordSignature {
+                params: fresh_names.clone(),
+                fields: sig_fields 
+            });
+        }
         TypeDec::Alias(rhs) => {
-            if context.get_alias(&header.n).is_some() {
-                return Err(UnificationError { pos: None, message: format!("Type alias `{}` is already declared", header.n) });
-            }
-            if context.has_enum_name(&header.n) {
-                return Err(UnificationError { pos: None, message: format!("`{}` is already declared as an enum", header.n) });
-            }
             let elaborated = rhs.t.instantiate(&mut mapping);
             check_undeclared(&elaborated, &fresh_names)?;
             context.add_alias(header.n.clone(), TypeAlias { params : fresh_names, rhs : elaborated });
@@ -805,6 +862,9 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
             };
             Ok((Substitution::new(), typ))
         }
+        ENode::FieldAccess(expr, expr1) => todo!(),
+        ENode::Record(rec_name, field_assns) => todo!(),
+        ENode::With(expr, field_assns) => todo!(),
     }
 }
 
@@ -1021,6 +1081,9 @@ fn resolve_expr_types(expr : &mut Expr, sub : &Substitution) {
                 resolve_expr_types(&mut c.exp, sub);
             }
         },
+        ENode::FieldAccess(expr, expr1) => todo!(),
+        ENode::Record(rec_name, field_assns) => todo!(),
+        ENode::With(expr, field_assns) => todo!(),
     }
 }
 

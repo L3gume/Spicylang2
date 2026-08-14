@@ -1162,6 +1162,9 @@ pub fn lower_type_decl<'a>(
                 );
             }
             module.enums.insert(header.n.clone(), layout);
+        },
+        TypeDec::Record(fields) => {
+            return Err("Not Implemented yet".to_string());
         }
         TypeDec::Alias(rhs) => {
             if module.aliases.contains_key(&header.n) || module.enums.contains_key(&header.n) {
