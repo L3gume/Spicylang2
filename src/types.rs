@@ -1,6 +1,5 @@
 use core::panic;
 use std::fmt::Display;
-use std::mem::uninitialized;
 use std::sync::OnceLock;
 use std::collections::{HashMap, HashSet};
 
@@ -294,11 +293,6 @@ pub struct TypeAlias {
     pub rhs : Monotype,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecordSignature {
-    pub params : Vec<String>,
-    pub fields : Vec<(String, Monotype)>
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeContext {
@@ -306,8 +300,6 @@ pub struct TypeContext {
     pub variables : HashMap<String, Polytype>,
     type_aliases : HashMap<String, TypeAlias>,
     enum_names : HashSet<String>,
-    record_names : HashSet<String>,
-    record_signatures: HashMap<String, RecordSignature>
 }
 
 impl Default for TypeContext {
@@ -323,8 +315,6 @@ impl TypeContext {
             variables : HashMap::new(),
             type_aliases : HashMap::new(),
             enum_names : HashSet::new(),
-            record_names: HashSet::new(),
-            record_signatures: HashMap::new()
         };
         for (name, poly) in builtins() {
             ctx.variables.insert(name.clone(), poly.clone());
@@ -338,8 +328,6 @@ impl TypeContext {
             variables : map,
             type_aliases : HashMap::new(),
             enum_names : HashSet::new(),
-            record_names: HashSet::new(),
-            record_signatures: HashMap::new(),
         }
     }
 
@@ -371,27 +359,12 @@ impl TypeContext {
         self.enum_names.contains(name)
     }
 
-    pub fn has_record_name(&self, name : &str) -> bool {
-        self.record_names.contains(name)
-    }
-
-    pub fn add_record_signature(&mut self, rec_name : String, sig : RecordSignature) {
-        self.record_names.insert(rec_name.clone());
-        self.record_signatures.insert(rec_name, sig);
-    }
-
-    pub fn get_record_signature(&self, rec_name : &String) -> Option<&RecordSignature> {
-        self.record_signatures.get(rec_name)
-    }
-
     pub fn apply(&self, sub : &Substitution) -> TypeContext {
         TypeContext {
             type_var_ctr: self.type_var_ctr,
             variables: self.variables.iter().map(|(k, t)| (k.clone(), t.apply(sub))).collect(),
             type_aliases: self.type_aliases.clone(),
             enum_names: self.enum_names.clone(),
-            record_names: self.record_names.clone(),
-            record_signatures: self.record_signatures.clone(),
         }
     }
 
@@ -573,16 +546,7 @@ fn expand(typ : &Monotype, context : &mut TypeContext, visited : &mut Vec<String
             match &**func {
                 TypeFunc::Infer => Ok(Monotype::TypeVariable(context.new_typevar())),
                 TypeFunc::Enum(name) => match context.get_alias(name).cloned() {
-                    None => match context.get_record_signature(name) {
-                        Some(sig) => {
-                            if expanded_args.len() != sig.params.len() {
-                                return Err(UnificationError { pos: None, message: format!("Record `{}` expects {} type argument(s), got {}", name, sig.params.len(), expanded_args.len()) });
-                            }
-                            //Ok(Monotype::record(name.clone(), expanded_args))
-                            todo!()
-                        },
-                        None => Ok(Monotype::TypeFuncApplication(func.clone(), expanded_args)),
-                    },
+                    None => Ok(Monotype::TypeFuncApplication(func.clone(), expanded_args)),
                     Some(alias) => {
                         if visited.contains(name) {
                             return Err(UnificationError { pos: None, message: format!("Recursive type alias: {}", name) });
@@ -620,7 +584,6 @@ fn check_undeclared(typ : &Monotype, declared : &[String]) -> Result<(), Unifica
     }
 }
 
-// TODO:: need to handle position of errors
 pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut TypeContext) -> Result<(), UnificationError> {
     let mut mapping : HashMap<String, Monotype> = HashMap::new();
     let mut fresh_vars : Vec<Monotype> = Vec::new();
@@ -637,9 +600,6 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
     }
     if context.has_enum_name(&header.n) {
         return Err(UnificationError { pos: None, message: format!("`{}` is already declared as an enum", header.n) });
-    }
-    if context.has_record_name(&header.n) {
-        return Err(UnificationError { pos: None, message: format!("Record `{}` is already declared", header.n) });
     }
     match dec {
         TypeDec::Enum(variants) => {
@@ -658,24 +618,14 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
             }
         },
         TypeDec::Record(fields) => {
-            // Register the name and parameters before expanding fields so
-            // recursive references (`record Node = { next: list Node }`)
-            // resolve to `Record(Node)` during field expansion.
-            context.add_record_signature(header.n.clone(), RecordSignature {
-                params: fresh_names.clone(),
-                fields: vec![],
-            });
-            let mut sig_fields = Vec::new();
-            for field in fields {
+            let mut row = Monotype::empty_row();
+            for field in fields.iter().rev() {
                 let inst = field.1.t.instantiate(&mut mapping);
                 let expanded = expand(&inst, context, &mut Vec::new())?;
                 check_undeclared(&expanded, &fresh_names)?;
-                sig_fields.push((field.0.clone(), expanded));
+                row = Monotype::row_ext(field.0.clone(), expanded, row);
             }
-            context.add_record_signature(header.n.clone(), RecordSignature {
-                params: fresh_names.clone(),
-                fields: sig_fields
-            });
+            context.add_alias(header.n.clone(), TypeAlias { params: fresh_names, rhs: Monotype::rec(row) });
         }
         TypeDec::Alias(rhs) => {
             let elaborated = rhs.t.instantiate(&mut mapping);
@@ -1176,10 +1126,10 @@ impl Stmt {
                 SNode::Decl(e1, t1, e2) => {
                     let var_name = match &*e1.e {
                         ENode::Variable(name) => name.clone(),
-                        _ => return Err(UnificationError { pos: None, message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
+                        _ => return Err(UnificationError { pos: Some(self.pos.clone()), message: format!("Expected a variable name in declaration, got {:?}", *e1.e) }),
                     };
                     if TypeContext::is_builtin(&var_name) {
-                        return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
+                        return Err(UnificationError { pos: Some(self.pos.clone()), message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
                     }
                     let binding_type = type_to_typefn(t1, &mut context)?;
                     let old_binding = context.get(&var_name);
