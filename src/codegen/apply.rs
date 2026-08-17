@@ -312,7 +312,7 @@ pub(crate) fn specialize_binding<'c>(
         return Ok(symbol.clone());
     }
 
-    let substitution = crate::types::unify(&info.abs_type, &concrete)
+    let substitution = crate::types::unify(&mut TypeContext::new(), &info.abs_type, &concrete)
         .map_err(|e| format!("codegen: cannot specialize `{name}`: {}", e.message))?;
     let mut body = info.body.clone();
     crate::types::apply_substitution(&mut body, &substitution);

@@ -308,7 +308,7 @@ pub enum ENode {
     Cons(Box<Expr>, Box<Expr>),
     Match(Box<Expr>, Vec<MatchCase>),
     FieldAccess(Box<Expr>, String),
-    Record(String, Vec<FieldAssn>),
+    Record(Vec<FieldAssn>),
     With(Box<Expr>, Vec<FieldAssn>)
     
 }
@@ -330,8 +330,8 @@ impl Display for ENode {
             ENode::List(exprs) => write!(f, "List({})", exprs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")),
             ENode::Cons(expr, expr1) => write!(f, "Cons({}, {})", expr, expr1),
             ENode::Match(expr, match_cases) => write!(f, "Match({}, {})", expr, match_cases.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")),
-            ENode::FieldAccess(expr, expr1) => todo!(),
-            ENode::Record(rec_name, field_assns) => todo!(),
+            ENode::FieldAccess(expr, expr1) => write!(f, "Field({}, {})", expr, expr1),
+            ENode::Record(field_assns) => todo!(),
             ENode::With(expr, field_assns) => todo!(),
         }
     }
@@ -467,7 +467,7 @@ fn fill_expr_positions(expr : &mut Expr, index : &LineIndex) {
             }
         },
         ENode::FieldAccess(expr, expr1) => todo!(),
-        ENode::Record(rec_name, field_assns) => todo!(),
+        ENode::Record(field_assns) => todo!(),
         ENode::With(expr, field_assns) => todo!(),
     }
 }

@@ -49,6 +49,9 @@ fn render_type_inner(t: &Monotype, vars: &mut HashMap<String, String>) -> String
                     format!("{} {}", name, rendered.join(" "))
                 }
             }
+            TypeFunc::Rec => todo!(),
+            TypeFunc::RowExt(_) => todo!(),
+            TypeFunc::EmptyRow => todo!(),
         },
     }
 }

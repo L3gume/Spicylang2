@@ -29,6 +29,9 @@ pub(crate) fn lower_type<'a>(typ: &Monotype, module: &Module<'a>) -> Result<Type
             TypeFunc::List => Err("codegen: list type lowering not implemented".to_string()),
             TypeFunc::Enum(_) => Type::parse(module.context, "!llvm.ptr")
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string()),
+            TypeFunc::Rec => todo!(),
+            TypeFunc::RowExt(_) => todo!(),
+            TypeFunc::EmptyRow => todo!(),
         },
         // Curried function types lower to a single flat `FunctionType` taking
         // all parameters at once, matching the multi-argument specialization

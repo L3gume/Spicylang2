@@ -1,5 +1,6 @@
 use core::panic;
 use std::fmt::Display;
+use std::mem::uninitialized;
 use std::sync::OnceLock;
 use std::collections::{HashMap, HashSet};
 
@@ -19,7 +20,9 @@ pub enum TypeFunc {
     Fn, // ->
     List,
     Enum(String),
-    Record(String)
+    Rec,
+    RowExt(String),
+    EmptyRow,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,11 +48,37 @@ impl Display for Monotype {
                     TypeFunc::List => write!(f, "list {}", monotypes[0]),
                     TypeFunc::Enum(n) => write!(f, "{} {}", n,
                         monotypes.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(" ")),
-                    TypeFunc::Record(n) => write!(f, "{}{{{}}}", n,
-                        monotypes.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")),
+                    TypeFunc::Rec => {
+                        write!(f, "{{")?;
+                        fmt_row(f, &monotypes[0])?;
+                        write!(f, "}}")
+                    },
+                    TypeFunc::RowExt(n) => write!(f, "({}: {}; {})", n, monotypes[0], monotypes[1]),
+                    TypeFunc::EmptyRow => write!(f, "∅"),
                 }
             }
         }
+    }
+}
+
+fn fmt_row(f: &mut std::fmt::Formatter<'_>, row: &Monotype) -> std::fmt::Result {
+    match row {
+        Monotype::TypeVariable(v) => write!(f, "{}", v),
+        Monotype::TypeFuncApplication(func, args) => match &**func {
+            TypeFunc::EmptyRow => Ok(()),
+            TypeFunc::RowExt(label) => {
+                write!(f, "{}: {}", label, args[0])?;
+                match &args[1] {
+                    Monotype::TypeFuncApplication(f2, _) if **f2 == TypeFunc::EmptyRow => Ok(()),
+                    Monotype::TypeVariable(v) => write!(f, " | {}", v),
+                    rest => {
+                        write!(f, ", ")?;
+                        fmt_row(f, rest)
+                    }
+                }
+            }
+            _ => write!(f, "{}", row),
+        },
     }
 }
 
@@ -158,9 +187,18 @@ impl Monotype {
         }
     }
 
-    pub fn record(name : String, vars : Vec<Monotype>) -> Monotype {
-        Monotype::TypeFuncApplication(Box::new(TypeFunc::Record(name)), vars)
+    pub fn rec(row: Monotype) -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::Rec), vec![row])
     }
+
+    pub fn row_ext(label: String, field: Monotype, rest: Monotype) -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::RowExt(label)), vec![field, rest])
+    }
+
+    pub fn empty_row() -> Monotype {
+        Monotype::TypeFuncApplication(Box::new(TypeFunc::EmptyRow), vec![])
+    }
+
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,6 +380,10 @@ impl TypeContext {
         self.record_signatures.insert(rec_name, sig);
     }
 
+    pub fn get_record_signature(&self, rec_name : &String) -> Option<&RecordSignature> {
+        self.record_signatures.get(rec_name)
+    }
+
     pub fn apply(&self, sub : &Substitution) -> TypeContext {
         TypeContext {
             type_var_ctr: self.type_var_ctr,
@@ -387,42 +429,108 @@ impl TypeContext {
     }
 }
 
-pub fn unify(typ1 : &Monotype, typ2 : &Monotype) -> Result<Substitution, UnificationError> {
-    match typ1 {
-        Monotype::TypeVariable(v1) => match typ2 {
-            Monotype::TypeVariable(v2) =>
-                if v1 == v2 {
-                    Ok(Substitution::new())
-                } else {
-                    if typ2.contains(typ1) {
-                        Err(UnificationError { pos: None, message: "Infinite recursive type".to_string() })
-                    } else {
-                        Ok(Substitution::make(HashMap::from([(v1.clone(), typ2.clone())])))
-                    }
-                },
-            _ => if typ2.contains(typ1) {
+pub fn unify(context: &mut TypeContext, typ1 : &Monotype, typ2 : &Monotype) -> Result<Substitution, UnificationError> {
+    match (typ1, typ2) {
+        (Monotype::TypeVariable(v1), Monotype::TypeVariable(v2)) => {
+            if v1 == v2 {
+                Ok(Substitution::new())
+            } else {
+                if typ2.contains(typ1) {
                     Err(UnificationError { pos: None, message: "Infinite recursive type".to_string() })
                 } else {
                     Ok(Substitution::make(HashMap::from([(v1.clone(), typ2.clone())])))
                 }
+            }
+        },
+        (Monotype::TypeVariable(v1), _) => { 
+            if typ2.contains(typ1) {
+                Err(UnificationError { pos: None, message: "Infinite recursive type".to_string() })
+            } else {
+                Ok(Substitution::make(HashMap::from([(v1.clone(), typ2.clone())])))
+            }
         }
-        Monotype::TypeFuncApplication(f1, ts1) => match typ2 {
-            Monotype::TypeVariable(_) => unify(typ2, typ1),
-            Monotype::TypeFuncApplication(f2, ts2 ) =>
-                if f1 != f2 {
-                    Err(UnificationError { pos: None, message: format!("Type function application mismatch: {:?} != {:?} (full: {:?} vs {:?})", f1, f2, typ1, typ2) })
+        (Monotype::TypeFuncApplication(_, _), Monotype::TypeVariable(_)) => unify(context, typ2, typ1),
+        // Row constructors (`Rec`, `RowExt`, `EmptyRow`) need dedicated
+        // unification (label commutation); the generic pointwise case below
+        // would wrongly reject or mis-unify them.
+        (Monotype::TypeFuncApplication(f1, _), Monotype::TypeFuncApplication(f2, _))
+            if is_row_ctor(&**f1) || is_row_ctor(&**f2) =>
+            unify_row(context, typ1, typ2),
+        (Monotype::TypeFuncApplication(f1, ts1),
+            Monotype::TypeFuncApplication(f2, ts2 )) => {
+            if f1 != f2 {
+                Err(UnificationError { pos: None, message: format!("Type function application mismatch: {:?} != {:?} (full: {:?} vs {:?})", f1, f2, typ1, typ2) })
+            } else {
+                if ts1.len() != ts2.len() {
+                    Err(UnificationError { pos: None, message: format!("Type functions have different number of args: {:?}, {:?}", ts1, ts2) })
                 } else {
-                    if ts1.len() != ts2.len() {
-                        Err(UnificationError { pos: None, message: format!("Type functions have different number of args: {:?}, {:?}", ts1, ts2) })
-                    } else {
-                        let mut sub = Substitution::new();
-                        for (t1, t2) in ts1.iter().zip(ts2.iter()) {
-                            sub = sub.combine(unify(&t1.apply(&sub), &t2.apply(&sub))?);
-                        }
-                        Ok(sub)
+                    let mut sub = Substitution::new();
+                    for (t1, t2) in ts1.iter().zip(ts2.iter()) {
+                        sub = sub.combine(unify(context,&t1.apply(&sub), &t2.apply(&sub))?);
                     }
+                    Ok(sub)
                 }
+            }
         }
+    }
+}
+
+
+fn is_row_ctor(f: &TypeFunc) -> bool {
+    matches!(f, TypeFunc::Rec | TypeFunc::RowExt(_) | TypeFunc::EmptyRow)
+}
+
+// A `Rec` constructor wraps a single row; unwrap it so `unify_row` only ever
+// sees rows (type variables, `EmptyRow`, or `RowExt` chains).
+fn peel_rec(m: &Monotype) -> &Monotype {
+    match m {
+        Monotype::TypeFuncApplication(f, ts) if **f == TypeFunc::Rec => &ts[0],
+        _ => m,
+    }
+}
+
+fn unify_row(context : &mut TypeContext, r1 : &Monotype, r2 : &Monotype) -> Result<Substitution, UnificationError> {
+    let row1 = peel_rec(r1);
+    let row2 = peel_rec(r2);
+    match (row1, row2) {
+        (Monotype::TypeVariable(v), _) => {
+            if row2.contains(row1) {
+                Err(UnificationError { pos: None, message: "Infinite recursive type".to_string() })
+            } else {
+                Ok(Substitution::make(HashMap::from([(v.clone(), row2.clone())])))
+            }
+        },
+        (_, Monotype::TypeVariable(v)) => {
+            if row1.contains(row2) {
+                Err(UnificationError { pos: None, message: "Infinite recursive type".to_string() })
+            } else {
+                Ok(Substitution::make(HashMap::from([(v.clone(), row1.clone())])))
+            }
+        },
+        (Monotype::TypeFuncApplication(f1, ts1), Monotype::TypeFuncApplication(f2, ts2)) => {
+            match (&**f1, &**f2) {
+                (TypeFunc::EmptyRow, TypeFunc::EmptyRow) => Ok(Substitution::new()),
+                (TypeFunc::EmptyRow, TypeFunc::RowExt(_)) | (TypeFunc::RowExt(_), TypeFunc::EmptyRow) =>
+                    Err(UnificationError { pos: None, message: "Row width mismatch: cannot unify a closed row with a field row".to_string() }),
+                (TypeFunc::RowExt(l1), TypeFunc::RowExt(l2)) => {
+                    let (t1, rest1) = (&ts1[0], &ts1[1]);
+                    let (t2, rest2) = (&ts2[0], &ts2[1]);
+                    if l1 == l2 {
+                        let s = unify(context, t1, t2)?;
+                        let s2 = unify_row(context, &rest1.apply(&s), &rest2.apply(&s))?;
+                        Ok(s.combine(s2))
+                    } else {
+                        // Commutation: fold each missing field into the other
+                        // row's tail, sharing a fresh row variable.
+                        let fresh = Monotype::var(context.new_typevar());
+                        let s1 = unify_row(context, rest1, &Monotype::row_ext(l2.clone(), t2.clone(), fresh.clone()))?;
+                        let s2 = unify_row(context, &rest2.apply(&s1), &Monotype::row_ext(l1.clone(), t1.apply(&s1), fresh.apply(&s1)))?;
+                        Ok(s1.combine(s2))
+                    }
+                },
+                _ => Err(UnificationError { pos: None, message: format!("Type function application mismatch: {:?} != {:?} (full: {:?} vs {:?})", f1, f2, r1, r2) }),
+            }
+        },
     }
 }
 
@@ -465,7 +573,16 @@ fn expand(typ : &Monotype, context : &mut TypeContext, visited : &mut Vec<String
             match &**func {
                 TypeFunc::Infer => Ok(Monotype::TypeVariable(context.new_typevar())),
                 TypeFunc::Enum(name) => match context.get_alias(name).cloned() {
-                    None => Ok(Monotype::TypeFuncApplication(func.clone(), expanded_args)),
+                    None => match context.get_record_signature(name) {
+                        Some(sig) => {
+                            if expanded_args.len() != sig.params.len() {
+                                return Err(UnificationError { pos: None, message: format!("Record `{}` expects {} type argument(s), got {}", name, sig.params.len(), expanded_args.len()) });
+                            }
+                            //Ok(Monotype::record(name.clone(), expanded_args))
+                            todo!()
+                        },
+                        None => Ok(Monotype::TypeFuncApplication(func.clone(), expanded_args)),
+                    },
                     Some(alias) => {
                         if visited.contains(name) {
                             return Err(UnificationError { pos: None, message: format!("Recursive type alias: {}", name) });
@@ -541,6 +658,13 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
             }
         },
         TypeDec::Record(fields) => {
+            // Register the name and parameters before expanding fields so
+            // recursive references (`record Node = { next: list Node }`)
+            // resolve to `Record(Node)` during field expansion.
+            context.add_record_signature(header.n.clone(), RecordSignature {
+                params: fresh_names.clone(),
+                fields: vec![],
+            });
             let mut sig_fields = Vec::new();
             for field in fields {
                 let inst = field.1.t.instantiate(&mut mapping);
@@ -550,7 +674,7 @@ pub fn handle_type_decl(header : &TypeHeader, dec : &TypeDec, context : &mut Typ
             }
             context.add_record_signature(header.n.clone(), RecordSignature {
                 params: fresh_names.clone(),
-                fields: sig_fields 
+                fields: sig_fields
             });
         }
         TypeDec::Alias(rhs) => {
@@ -608,264 +732,344 @@ pub fn algo_w(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substitut
 
 fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substitution, Monotype), UnificationError> {
     match &mut *expr.e {
-        ENode::Variable(name) => match context.get(name) {
-            Some(poly) => {
-                Ok((Substitution::new(), poly.instantiate(context, None)))
-            }
-            _ => Err(UnificationError { pos: None, message: format!("Undefined variable {}!", name) } )
-        },
-        ENode::Abstraction(bind, exp) => {
-            let Binding(name, typp) = &**bind;
-            let beta_mon = type_to_typefn(typp, context)?;
-            let beta_poly = Polytype::Mono(Box::new(beta_mon.clone()));
-            let old_binding = context.get(name);
-            context.add(name.clone(), beta_poly);
-            let (sub1, t1) = algo_w(context, exp)?;
-            match old_binding {
-                Some(poly) => context.add(name.clone(), poly),
-                None => context.remove(name),
-            }
-            let beta = Monotype::TypeFuncApplication(Box::new(TypeFunc::Fn), vec!(beta_mon, t1)).apply(&sub1);
-            Ok((sub1, beta))
-        },
-        ENode::Application(exp1, exp2) => {
-            let (s1, t1) = algo_w(context, exp1)?;
-            *context = context.apply(&s1);
-            let (s2, t2) = algo_w(context, exp2)?;
-            let ret_var = Monotype::var(context.new_typevar());
-            let beta = TypeFuncApplication(Box::new(TypeFunc::Fn), vec!(t2, ret_var.clone()));
-            let s3 = unify(&t1.apply(&s2), &beta)?;
-            Ok((s1.combine(s2).combine(s3.clone()), ret_var.apply(&s3)))
-        },
-        ENode::Let(name, exp1, exp2) => {
-            if TypeContext::is_builtin(name) {
-                return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", name) });
-            }
-            let rec_var = Monotype::var(context.new_typevar());
-            let old_binding = context.get(name);
-            context.add(name.clone(), Polytype::Mono(Box::new(rec_var.clone())));
-            let (s1, t1) = algo_w(context, exp1)?;
-            *context = context.apply(&s1);
-            let s_rec = unify(&t1, &rec_var.apply(&s1))?;
-            let combined = s1.combine(s_rec.clone());
-            *context = context.apply(&combined);
-            match old_binding {
-                Some(poly) => context.add(name.clone(), poly),
-                None => context.remove(name),
-            }
-            let generalized = context.generalise(&t1.apply(&s_rec));
-            context.add(name.clone(), generalized);
-            let (s2, t2) = algo_w(context, exp2)?;
-            Ok((combined.combine(s2), t2))
-        }
-        ENode::IfElse(cond, exp1, exp2) => {
-            let (s1, t1) = algo_w(context, cond)?;
-            let s2 = unify(&t1, &Monotype::bool())?;
-            *context = context.apply(&s1).apply(&s2);
-            let (s3, t3) = algo_w(context, exp1)?;
-            *context = context.apply(&s3);
-            let (s4, t4) = algo_w(context, exp2)?;
-            let s5 = unify(&t3.apply(&s4), &t4)?;
-            Ok((
-                s1.combine(s2).combine(s3).combine(s4.clone()).combine(s5.clone()),
-                t3.apply(&s4).apply(&s5)
-            ))
-        },
-        ENode::Block(stmts, exp) => {
-            let mut combined = Substitution::new();
-            for s in stmts {
-                match &mut *s.s {
-                    SNode::Decl(e1, t1, e2) => {
-                        let var_name = match &*e1.e {
-                            ENode::Variable(name) => name.clone(),
-                            _ => return Err(UnificationError { pos: None, message: "Expected a variable name in declaration".to_string() }),
-                        };
-                        if TypeContext::is_builtin(&var_name) {
-                            return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
-                        }
-                        let binding_type = type_to_typefn(t1, context)?;
-                        let old_binding = context.get(&var_name);
-                        context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
-                        let (s1, inferred_type) = algo_w(context, e2)?;
-                        *context = context.apply(&s1);
-                        combined = combined.combine(s1);
-                        let s2 = unify(&binding_type.apply(&combined), &inferred_type)?;
-                        *context = context.apply(&s2);
-                        combined = combined.combine(s2);
-                        match old_binding {
-                            Some(poly) => context.add(var_name.clone(), poly),
-                            None => context.remove(&var_name),
-                        }
-                        let resolved = binding_type.apply(&combined);
-                        let generalized = context.generalise(&resolved);
-                        context.add(var_name, generalized);
-                    },
-                    SNode::Expr(e1) => {
-                        let (s1, _) = algo_w(context, e1)?;
-                        *context = context.apply(&s1);
-                        combined = combined.combine(s1);
-                    },
-                    SNode::TypeDecl(_, _) => return Err(UnificationError {
-                        pos: None,
-                        message: "Type declarations are not allowed inside block expressions".to_string()
-                    }),
-                }
-            }
-            let (s_exp, t_exp) = algo_w(context, exp)?;
-            combined = combined.combine(s_exp);
-            Ok((combined, t_exp))
-        },
-        ENode::List(exps) => {
-            if exps.is_empty() {
-                let tv = Monotype::var(context.new_typevar());
-                Ok((Substitution::new(), Monotype::list(tv)))
-            } else {
-                let (s0, t0) = algo_w(context, &mut exps[0])?;
-                *context = context.apply(&s0);
-                let mut combined = s0;
-                let mut elem_type = t0;
-                for e in exps[1..].iter_mut() {
-                    let (s_i, t_i) = algo_w(context, e)?;
-                    *context = context.apply(&s_i);
-                    combined = combined.combine(s_i);
-                    let s_u = unify(&elem_type, &t_i)?;
-                    combined = combined.combine(s_u.clone());
-                    elem_type = elem_type.apply(&s_u);
-                }
-                Ok((combined, Monotype::list(elem_type)))
-            }
-        },
-        ENode::Cons(e1, e2) => {
-            let (s1, t1) = algo_w(context, e1)?;
-            *context = context.apply(&s1);
-            let (s2, t2) = algo_w(context, e2)?;
-            let elem = t1.apply(&s2);
-            let s3 = unify(&t2, &Monotype::list(elem.clone()))?;
-            let result = Monotype::list(elem.apply(&s3));
-            Ok((s1.combine(s2).combine(s3), result))
-        },
-        ENode::Match(e, cases) => {
-            let (s0, t0) = algo_w(context, e)?;
-            *context = context.apply(&s0);
-            let mut match_t = t0;
-            let mut combined = s0;
-            let ret = Monotype::var(context.new_typevar());
-            for MatchCase { val: e1, exp: e2 } in cases.iter_mut() {
-                let mut case_ctx = context.apply(&combined);
-                let s1 = type_pattern(&mut case_ctx, e1, &match_t)?;
-                combined = combined.combine(s1);
-                let (s2, t2) = algo_w(&mut case_ctx, e2)?;
-                combined = combined.combine(s2);
-                // case_ctx is a clone with its own type-var counter; vars
-                // allocated there leak into `combined`/`match_t`, so pull the
-                // counter back up to keep fresh names globally unique.
-                context.type_var_ctr = context.type_var_ctr.max(case_ctx.type_var_ctr);
-                let s_u = unify(&ret.apply(&combined), &t2.apply(&combined))?;
-                combined = combined.combine(s_u);
-                match_t = match_t.apply(&combined);
-            }
-            check_exhaustive(&match_t, cases)?;
-            let resolved_ret = ret.apply(&combined);
-            Ok((combined, resolved_ret))
-        },
-        ENode::Arithmetic(op, e1, e2) => {
-            let (s1, t1) = algo_w(context, e1)?;
-            *context = context.apply(&s1);
-            let (s2, t2) = algo_w(context, e2)?;
-            let s3 = unify(&t1.apply(&s2), &t2)?;
-            let unified = t1.apply(&s2).apply(&s3);
-            if !matches!(unified, Monotype::TypeVariable(_)) {
-                match op {
-                    ArithOp::Plus => {
-                        unify(&unified, &Monotype::int())
-                            .or_else(|_| unify(&unified, &Monotype::float()))
-                            .or_else(|_| unify(&unified, &Monotype::string()))
-                            .map_err(|_| UnificationError { pos: None, message: format!("'+' requires int, float, or string operands, got {:?}", unified) })?;
-                    },
-                    _ => {
-                        unify(&unified, &Monotype::int())
-                            .or_else(|_| unify(&unified, &Monotype::float()))
-                            .map_err(|_| UnificationError { pos: None, message: format!("{:?} requires int or float operands, got {:?}", op, unified) })?;
-                    },
-                }
-            }
-            Ok((s1.combine(s2).combine(s3), unified))
-        },
-        ENode::Comparison(op, e1, e2) => {
-            let (s1, t1) = algo_w(context, e1)?;
-            *context = context.apply(&s1);
-            let (s2, t2) = algo_w(context, e2)?;
-            let s3 = unify(&t1.apply(&s2), &t2)?;
-            let unified = t1.apply(&s2).apply(&s3);
-            if !matches!(unified, Monotype::TypeVariable(_)) {
-                match op {
-                    CompOp::Eq | CompOp::NotEq => {
-                        if let Monotype::TypeFuncApplication(f, _) = &unified && **f == TypeFunc::Fn {
-                            return Err(UnificationError { pos: None, message: "Cannot compare function types".to_string() });
-                        }
-                        let op_name = if *op == CompOp::Eq { "==" } else { "!=" };
-                        unify(&unified, &Monotype::int())
-                            .or_else(|_| unify(&unified, &Monotype::float()))
-                            .or_else(|_| unify(&unified, &Monotype::string()))
-                            .or_else(|_| unify(&unified, &Monotype::bool()))
-                            .map_err(|_| UnificationError { pos: None, message: format!("'{}' requires int, float, string, or bool operands", op_name) })?;
-                    },
-                    _ => {
-                        unify(&unified, &Monotype::int())
-                            .or_else(|_| unify(&unified, &Monotype::float()))
-                            .map_err(|_| UnificationError { pos: None, message: "Comparison requires int or float operands".to_string() })?;
-                    },
-                }
-            }
-            Ok((s1.combine(s2).combine(s3), Monotype::bool()))
-        },
-        ENode::Logical(_, e1, e2) => {
-            let (s1, t1) = algo_w(context, e1)?;
-            *context = context.apply(&s1);
-            let (s2, t2) = algo_w(context, e2)?;
-            let s3 = unify(&t1.apply(&s2), &t2)?;
-            let unified = t1.apply(&s2).apply(&s3);
-            let s4 = unify(&unified, &Monotype::bool())
-                .map_err(|_| UnificationError { pos: None, message: format!("Logical operations require bool operands, got {:?}", unified) })?;
-            Ok((s1.combine(s2).combine(s3).combine(s4), Monotype::bool()))
-        },
-        ENode::Unary(op, e) => match op {
-            UnaryOp::Negate => {
-                let (s1, t1) = algo_w(context, e)?;
-                if matches!(t1, Monotype::TypeVariable(_)) {
-                    *context = context.apply(&s1);
-                    return Ok((s1, t1));
-                }
-                let s2 = unify(&t1, &Monotype::int())
-                    .or_else(|_| unify(&t1, &Monotype::float()))
-                    .map_err(|_| UnificationError { pos: None, message: format!("Unary negation requires int or float operand, got {:?}", t1) })?;
-                let s3 = s1.combine(s2);
-                *context = context.apply(&s3);
-                Ok((s3.clone(), t1.apply(&s3)))
-            },
-            UnaryOp::Not => {
-                let (s1, t1) = algo_w(context, e)?;
-                let s2 = unify(&t1, &Monotype::bool())?;
-                let s3 = s1.combine(s2);
-                *context = context.apply(&s3);
-                Ok((s3.clone(), Monotype::bool()))
-            },
-        }
-        ENode::Literal(lit) => {
-            let typ = match lit.as_ref() {
-                Lit::Int(_) => Monotype::int(),
-                Lit::Bool(_) => Monotype::bool(),
-                Lit::Str(_) => Monotype::string(),
-                Lit::Float(_) => Monotype::float(),
-                Lit::Char(_) => Monotype::char(),
-                Lit::Unit => Monotype::unit(),
-            };
-            Ok((Substitution::new(), typ))
-        }
-        ENode::FieldAccess(expr, expr1) => todo!(),
-        ENode::Record(rec_name, field_assns) => todo!(),
-        ENode::With(expr, field_assns) => todo!(),
+        ENode::Variable(name) => infer_variable(context, name),
+        ENode::Abstraction(bind, exp) => infer_abstraction(context, bind, exp),
+        ENode::Application(e1, e2) => infer_application(context, e1, e2),
+        ENode::Let(name, e1, e2) => infer_let(context, name, e1, e2),
+        ENode::IfElse(cond, e1, e2) => infer_if_else(context, cond, e1, e2),
+        ENode::Block(stmts, exp) => infer_block(context, stmts, exp),
+        ENode::List(exps) => infer_list(context, exps),
+        ENode::Cons(e1, e2) => infer_cons(context, e1, e2),
+        ENode::Match(e, cases) => infer_match(context, e, cases),
+        ENode::Arithmetic(op, e1, e2) => infer_arithmetic(context, op, e1, e2),
+        ENode::Comparison(op, e1, e2) => infer_comparison(context, op, e1, e2),
+        ENode::Logical(_, e1, e2) => infer_logical(context, e1, e2),
+        ENode::Unary(op, e) => infer_unary(context, op, e),
+        ENode::Literal(lit) => infer_literal(lit),
+        ENode::FieldAccess(e, f) => infer_field_access(context, e, f),
+        ENode::Record(fs) => infer_record(context, fs),
+        ENode::With(e, fs) => infer_with(context, e, fs),
     }
+}
+
+fn infer_variable(context : &mut TypeContext, name : &mut String) -> Result<(Substitution, Monotype), UnificationError> {
+    match context.get(name) {
+        Some(poly) => Ok((Substitution::new(), poly.instantiate(context, None))),
+        _ => Err(UnificationError { pos: None, message: format!("Undefined variable {}!", name) }),
+    }
+}
+
+fn infer_abstraction(context : &mut TypeContext, bind : &mut Box<Binding>, exp : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    let Binding(name, typp) = &**bind;
+    let beta_mon = type_to_typefn(typp, context)?;
+    let beta_poly = Polytype::Mono(Box::new(beta_mon.clone()));
+    let old_binding = context.get(name);
+    context.add(name.clone(), beta_poly);
+    let (sub1, t1) = algo_w(context, exp)?;
+    match old_binding {
+        Some(poly) => context.add(name.clone(), poly),
+        None => context.remove(name),
+    }
+    let beta = Monotype::TypeFuncApplication(Box::new(TypeFunc::Fn), vec![beta_mon, t1]).apply(&sub1);
+    Ok((sub1, beta))
+}
+
+fn infer_application(context : &mut TypeContext, exp1 : &mut Box<Expr>, exp2 : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s1, t1) = algo_w(context, exp1)?;
+    *context = context.apply(&s1);
+    let (s2, t2) = algo_w(context, exp2)?;
+    let ret_var = Monotype::var(context.new_typevar());
+    let beta = TypeFuncApplication(Box::new(TypeFunc::Fn), vec![t2, ret_var.clone()]);
+    let s3 = unify(context, &t1.apply(&s2), &beta)?;
+    Ok((s1.combine(s2).combine(s3.clone()), ret_var.apply(&s3)))
+}
+
+fn infer_let(context : &mut TypeContext, name : &mut String, exp1 : &mut Box<Expr>, exp2 : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    if TypeContext::is_builtin(name) {
+        return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", name) });
+    }
+    let rec_var = Monotype::var(context.new_typevar());
+    let old_binding = context.get(name);
+    context.add(name.clone(), Polytype::Mono(Box::new(rec_var.clone())));
+    let (s1, t1) = algo_w(context, exp1)?;
+    *context = context.apply(&s1);
+    let s_rec = unify(context, &t1, &rec_var.apply(&s1))?;
+    let combined = s1.combine(s_rec.clone());
+    *context = context.apply(&combined);
+    match old_binding {
+        Some(poly) => context.add(name.clone(), poly),
+        None => context.remove(name),
+    }
+    let generalized = context.generalise(&t1.apply(&s_rec));
+    context.add(name.clone(), generalized);
+    let (s2, t2) = algo_w(context, exp2)?;
+    Ok((combined.combine(s2), t2))
+}
+
+fn infer_if_else(context : &mut TypeContext, cond : &mut Box<Expr>, exp1 : &mut Box<Expr>, exp2 : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s1, t1) = algo_w(context, cond)?;
+    let s2 = unify(context, &t1, &Monotype::bool())?;
+    *context = context.apply(&s1).apply(&s2);
+    let (s3, t3) = algo_w(context, exp1)?;
+    *context = context.apply(&s3);
+    let (s4, t4) = algo_w(context, exp2)?;
+    let s5 = unify(context, &t3.apply(&s4), &t4)?;
+    Ok((
+        s1.combine(s2).combine(s3).combine(s4.clone()).combine(s5.clone()),
+        t3.apply(&s4).apply(&s5)
+    ))
+}
+
+fn infer_block(context : &mut TypeContext, stmts : &mut Vec<Stmt>, exp : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    let mut combined = Substitution::new();
+    for s in stmts {
+        match &mut *s.s {
+            SNode::Decl(e1, t1, e2) => {
+                let var_name = match &*e1.e {
+                    ENode::Variable(name) => name.clone(),
+                    _ => return Err(UnificationError { pos: None, message: "Expected a variable name in declaration".to_string() }),
+                };
+                if TypeContext::is_builtin(&var_name) {
+                    return Err(UnificationError { pos: None, message: format!("Redefinition of builtin function '{}' not allowed", var_name) });
+                }
+                let binding_type = type_to_typefn(t1, context)?;
+                let old_binding = context.get(&var_name);
+                context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
+                let (s1, inferred_type) = algo_w(context, e2)?;
+                *context = context.apply(&s1);
+                combined = combined.combine(s1);
+                let s2 = unify(context, &binding_type.apply(&combined), &inferred_type)?;
+                *context = context.apply(&s2);
+                combined = combined.combine(s2);
+                match old_binding {
+                    Some(poly) => context.add(var_name.clone(), poly),
+                    None => context.remove(&var_name),
+                }
+                let resolved = binding_type.apply(&combined);
+                let generalized = context.generalise(&resolved);
+                context.add(var_name, generalized);
+            },
+            SNode::Expr(e1) => {
+                let (s1, _) = algo_w(context, e1)?;
+                *context = context.apply(&s1);
+                combined = combined.combine(s1);
+            },
+            SNode::TypeDecl(_, _) => return Err(UnificationError {
+                pos: None,
+                message: "Type declarations are not allowed inside block expressions".to_string()
+            }),
+        }
+    }
+    let (s_exp, t_exp) = algo_w(context, exp)?;
+    combined = combined.combine(s_exp);
+    Ok((combined, t_exp))
+}
+
+fn infer_list(context : &mut TypeContext, exps : &mut Vec<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    if exps.is_empty() {
+        let tv = Monotype::var(context.new_typevar());
+        Ok((Substitution::new(), Monotype::list(tv)))
+    } else {
+        let (s0, t0) = algo_w(context, &mut exps[0])?;
+        *context = context.apply(&s0);
+        let mut combined = s0;
+        let mut elem_type = t0;
+        for e in exps[1..].iter_mut() {
+            let (s_i, t_i) = algo_w(context, e)?;
+            *context = context.apply(&s_i);
+            combined = combined.combine(s_i);
+            let s_u = unify(context, &elem_type, &t_i)?;
+            combined = combined.combine(s_u.clone());
+            elem_type = elem_type.apply(&s_u);
+        }
+        Ok((combined, Monotype::list(elem_type)))
+    }
+}
+
+fn infer_cons(context : &mut TypeContext, e1 : &mut Box<Expr>, e2 : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s1, t1) = algo_w(context, e1)?;
+    *context = context.apply(&s1);
+    let (s2, t2) = algo_w(context, e2)?;
+    let elem = t1.apply(&s2);
+    let s3 = unify(context, &t2, &Monotype::list(elem.clone()))?;
+    let result = Monotype::list(elem.apply(&s3));
+    Ok((s1.combine(s2).combine(s3), result))
+}
+
+fn infer_match(context : &mut TypeContext, e : &mut Box<Expr>, cases : &mut Vec<MatchCase>) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s0, t0) = algo_w(context, e)?;
+    *context = context.apply(&s0);
+    let mut match_t = t0;
+    let mut combined = s0;
+    let ret = Monotype::var(context.new_typevar());
+    for MatchCase { val: e1, exp: e2 } in cases.iter_mut() {
+        let mut case_ctx = context.apply(&combined);
+        let s1 = type_pattern(&mut case_ctx, e1, &match_t)?;
+        combined = combined.combine(s1);
+        let (s2, t2) = algo_w(&mut case_ctx, e2)?;
+        combined = combined.combine(s2);
+        // case_ctx is a clone with its own type-var counter; vars allocated
+        // there leak into `combined`/`match_t`, so pull the counter back up to
+        // keep fresh names globally unique.
+        context.type_var_ctr = context.type_var_ctr.max(case_ctx.type_var_ctr);
+        let s_u = unify(context, &ret.apply(&combined), &t2.apply(&combined))?;
+        combined = combined.combine(s_u);
+        match_t = match_t.apply(&combined);
+    }
+    check_exhaustive(&match_t, cases)?;
+    let resolved_ret = ret.apply(&combined);
+    Ok((combined, resolved_ret))
+}
+
+fn infer_arithmetic(context : &mut TypeContext, op : &mut ArithOp, e1 : &mut Box<Expr>, e2 : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s1, t1) = algo_w(context, e1)?;
+    *context = context.apply(&s1);
+    let (s2, t2) = algo_w(context, e2)?;
+    let s3 = unify(context, &t1.apply(&s2), &t2)?;
+    let unified = t1.apply(&s2).apply(&s3);
+    if !matches!(unified, Monotype::TypeVariable(_)) {
+        match op {
+            ArithOp::Plus => {
+                unify(context, &unified, &Monotype::int())
+                    .or_else(|_| unify(context, &unified, &Monotype::float()))
+                    .or_else(|_| unify(context, &unified, &Monotype::string()))
+                    .map_err(|_| UnificationError { pos: None, message: format!("'+' requires int, float, or string operands, got {:?}", unified) })?;
+            },
+            _ => {
+                unify(context, &unified, &Monotype::int())
+                    .or_else(|_| unify(context, &unified, &Monotype::float()))
+                    .map_err(|_| UnificationError { pos: None, message: format!("{:?} requires int or float operands, got {:?}", op, unified) })?;
+            },
+        }
+    }
+    Ok((s1.combine(s2).combine(s3), unified))
+}
+
+fn infer_comparison(context : &mut TypeContext, op : &mut CompOp, e1 : &mut Box<Expr>, e2 : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s1, t1) = algo_w(context, e1)?;
+    *context = context.apply(&s1);
+    let (s2, t2) = algo_w(context, e2)?;
+    let s3 = unify(context, &t1.apply(&s2), &t2)?;
+    let unified = t1.apply(&s2).apply(&s3);
+    if !matches!(unified, Monotype::TypeVariable(_)) {
+        match op {
+            CompOp::Eq | CompOp::NotEq => {
+                if let Monotype::TypeFuncApplication(f, _) = &unified && **f == TypeFunc::Fn {
+                    return Err(UnificationError { pos: None, message: "Cannot compare function types".to_string() });
+                }
+                let op_name = if *op == CompOp::Eq { "==" } else { "!=" };
+                unify(context, &unified, &Monotype::int())
+                    .or_else(|_| unify(context, &unified, &Monotype::float()))
+                    .or_else(|_| unify(context, &unified, &Monotype::string()))
+                    .or_else(|_| unify(context, &unified, &Monotype::bool()))
+                    .map_err(|_| UnificationError { pos: None, message: format!("'{}' requires int, float, string, or bool operands", op_name) })?;
+            },
+            _ => {
+                unify(context, &unified, &Monotype::int())
+                    .or_else(|_| unify(context, &unified, &Monotype::float()))
+                    .map_err(|_| UnificationError { pos: None, message: "Comparison requires int or float operands".to_string() })?;
+            },
+        }
+    }
+    Ok((s1.combine(s2).combine(s3), Monotype::bool()))
+}
+
+fn infer_logical(context : &mut TypeContext, e1 : &mut Box<Expr>, e2 : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s1, t1) = algo_w(context, e1)?;
+    *context = context.apply(&s1);
+    let (s2, t2) = algo_w(context, e2)?;
+    let s3 = unify(context, &t1.apply(&s2), &t2)?;
+    let unified = t1.apply(&s2).apply(&s3);
+    let s4 = unify(context, &unified, &Monotype::bool())
+        .map_err(|_| UnificationError { pos: None, message: format!("Logical operations require bool operands, got {:?}", unified) })?;
+    Ok((s1.combine(s2).combine(s3).combine(s4), Monotype::bool()))
+}
+
+fn infer_unary(context : &mut TypeContext, op : &mut UnaryOp, e : &mut Box<Expr>) -> Result<(Substitution, Monotype), UnificationError> {
+    match op {
+        UnaryOp::Negate => {
+            let (s1, t1) = algo_w(context, e)?;
+            if matches!(t1, Monotype::TypeVariable(_)) {
+                *context = context.apply(&s1);
+                return Ok((s1, t1));
+            }
+            let s2 = unify(context, &t1, &Monotype::int())
+                .or_else(|_| unify(context, &t1, &Monotype::float()))
+                .map_err(|_| UnificationError { pos: None, message: format!("Unary negation requires int or float operand, got {:?}", t1) })?;
+            let s3 = s1.combine(s2);
+            *context = context.apply(&s3);
+            Ok((s3.clone(), t1.apply(&s3)))
+        },
+        UnaryOp::Not => {
+            let (s1, t1) = algo_w(context, e)?;
+            let s2 = unify(context, &t1, &Monotype::bool())?;
+            let s3 = s1.combine(s2);
+            *context = context.apply(&s3);
+            Ok((s3.clone(), Monotype::bool()))
+        },
+    }
+}
+
+fn infer_literal(lit : &mut Box<Lit>) -> Result<(Substitution, Monotype), UnificationError> {
+    let typ = match lit.as_ref() {
+        Lit::Int(_) => Monotype::int(),
+        Lit::Bool(_) => Monotype::bool(),
+        Lit::Str(_) => Monotype::string(),
+        Lit::Float(_) => Monotype::float(),
+        Lit::Char(_) => Monotype::char(),
+        Lit::Unit => Monotype::unit(),
+    };
+    Ok((Substitution::new(), typ))
+}
+
+fn infer_field_access(context : &mut TypeContext, expr : &mut Box<Expr>, field : &mut String) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s1, t1) = algo_w(context, expr)?;
+    *context = context.apply(&s1);
+    let (alpha, rho) = (
+        Monotype::var(context.new_typevar()),
+        Monotype::var(context.new_typevar())
+    );
+    let rowtype = Monotype::rec(Monotype::row_ext(field.clone(), alpha.clone(), rho));
+    let s2 = unify(context, &t1.apply(&s1), &rowtype)?;
+    let s_unified = s1.combine(s2);
+    Ok((s_unified.clone(), alpha.apply(&s_unified)))
+}
+
+fn infer_record(context : &mut TypeContext, field_assns : &mut Vec<FieldAssn>) -> Result<(Substitution, Monotype), UnificationError> {
+    let mut combined = Substitution::new();
+    let mut acc_row = Monotype::empty_row();
+    for FieldAssn { field, exp } in field_assns {
+        let (s1, t1) = algo_w(context, exp)?;
+        combined = combined.combine(s1.clone());
+        *context = context.apply(&s1);
+        acc_row = acc_row.apply(&s1);
+        acc_row = Monotype::row_ext(field.clone(), t1.apply(&s1), acc_row);
+    }
+    Ok((combined, Monotype::rec(acc_row)))
+}
+
+fn infer_with(context : &mut TypeContext, expr : &mut Box<Expr>, field_assns : &mut Vec<FieldAssn>) -> Result<(Substitution, Monotype), UnificationError> {
+    let (s1, t1) = algo_w(context, expr)?;
+    *context = context.apply(&s1);
+    let mut combined = s1;
+    for FieldAssn { field, exp } in field_assns {
+        let (tau_l, rho) = (
+            Monotype::var(context.new_typevar()),
+            Monotype::var(context.new_typevar())
+        );
+        let s_rec = unify(context, &t1.apply(&combined), &Monotype::rec(Monotype::row_ext(field.clone(), tau_l.clone(), rho)))?;
+        *context = context.apply(&s_rec);
+        combined = combined.combine(s_rec);
+
+        let (s_val, t_val) = algo_w(context, exp)?;
+        *context = context.apply(&s_val);
+        combined = combined.combine(s_val);
+
+        let s_field = unify(context, &tau_l.apply(&combined), &t_val)?;
+        *context = context.apply(&s_field);
+        combined = combined.combine(s_field);
+    }
+    Ok((combined.clone(), t1.apply(&combined)))
 }
 
 pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Result<Substitution,UnificationError> {
@@ -877,7 +1081,7 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
         },
         ENode::Cons(hd, tl) => {
             let alpha = Monotype::var(context.new_typevar());
-            let s0 = unify(typ, &Monotype::list(alpha.clone()))?;
+            let s0 = unify(context, typ, &Monotype::list(alpha.clone()))?;
             *context = context.apply(&s0);
             let elem = alpha.apply(&s0);
             let s1 = type_pattern(context, hd, &elem)?;
@@ -914,7 +1118,7 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
                                 message: format!("Constructor `{}` applied to too many arguments", name)
                             });
                         }
-                        let s_last = unify(typ, &ctor)?;
+                        let s_last = unify(context, typ, &ctor)?;
                         return Ok(combined.combine(s_last));
                     },
                     _ => return Err(UnificationError {
@@ -926,12 +1130,31 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
         },
         ENode::List(exprs) => {
             let alpha = Monotype::var(context.new_typevar());
-            let s0 = unify(typ, &Monotype::list(alpha.clone()))?;
+            let s0 = unify(context, typ, &Monotype::list(alpha.clone()))?;
             *context = context.apply(&s0);
             let elem = alpha.apply(&s0);
             let mut combined = s0;
             for e in exprs {
                 let s = type_pattern(context, e, &elem)?;
+                *context = context.apply(&s);
+                combined = combined.combine(s);
+            }
+            Ok(combined)
+        },
+        ENode::Record(fields) => {
+            let mut alphas : Vec<Monotype> = Vec::new();
+            let mut row = Monotype::var(context.new_typevar());
+            for FieldAssn { field, .. } in fields.iter().rev() {
+                let alpha = Monotype::var(context.new_typevar());
+                row = Monotype::row_ext(field.clone(), alpha.clone(), row);
+                alphas.push(alpha);
+            }
+            alphas.reverse();
+            let s0 = unify(context, typ, &Monotype::rec(row))?;
+            *context = context.apply(&s0);
+            let mut combined = s0;
+            for (FieldAssn { exp, .. }, alpha) in fields.iter().zip(alphas.iter()) {
+                let s = type_pattern(context, exp, &alpha.apply(&combined))?;
                 *context = context.apply(&s);
                 combined = combined.combine(s);
             }
@@ -962,7 +1185,7 @@ impl Stmt {
                     let old_binding = context.get(&var_name);
                     context.add(var_name.clone(), Polytype::Mono(Box::new(binding_type.clone())));
                     let (s1, inferred_type) = algo_w(&mut context, e2)?;
-                    let s2 = unify(&binding_type.apply(&s1), &inferred_type)?;
+                    let s2 = unify(&mut context, &binding_type.apply(&s1), &inferred_type)?;
                     let combined = s1.combine(s2);
                     context = context.apply(&combined);
                     match old_binding {
@@ -1082,7 +1305,7 @@ fn resolve_expr_types(expr : &mut Expr, sub : &Substitution) {
             }
         },
         ENode::FieldAccess(expr, expr1) => todo!(),
-        ENode::Record(rec_name, field_assns) => todo!(),
+        ENode::Record(field_assns) => todo!(),
         ENode::With(expr, field_assns) => todo!(),
     }
 }

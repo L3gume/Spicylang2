@@ -61,7 +61,7 @@ pub(crate) fn lower_expr<'c, 'a>(
         ENode::List(es) => lower_list(es, block, module, env, location),
         ENode::Cons(h, t) => lower_cons(h, t, block, module, env, location),
         ENode::FieldAccess(expr, expr1) => todo!(),
-        ENode::Record(rec_name, field_assns) => todo!(),
+        ENode::Record(field_assns) => todo!(),
         ENode::With(expr, field_assns) => todo!(),
     }
 }

@@ -147,7 +147,7 @@ ConsOperand: Box<Expr> = {
 
 ExprBase: Box<Expr> = {
     LogExpr                                                                 => <>,
-    <start:@L> <n:Name> <fs:RecordBody> <end:@R>                            => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Record(n, fs))),
+    <start:@L> <n:Name> <fs:RecordBody> <end:@R>                            => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::Record(fs))),
     <start:@L> <e:WithOperand> "with" <fs:RecordBody> <end:@R>              => Box::new(Expr::at(Pos::bytes(start as u32, end as u32), ENode::With(e, fs))),
     Block                                                                   => <>
 };
