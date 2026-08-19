@@ -1,6 +1,6 @@
 # Grammar
 
-This document describes the concrete syntax of SpicyLang as defined in
+This document describes the concrete syntax of Merlin as defined in
 `src/grammar.lalrpop`. It is written in extended Backus-Naur form (EBNF) with
 the following notation:
 

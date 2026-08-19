@@ -1,6 +1,6 @@
 # Memory Management: Arena, Refcounting, and a Rust-style Lifetime System
 
-Plan for giving SpicyLang sound memory management. The goal is to end the current
+Plan for giving Merlin sound memory management. The goal is to end the current
 state where `itostr` buffers and list cons cells are `malloc`'d and never freed,
 so a long-lived REPL session (or a tight loop inside one program) leaks
 unbounded memory.
@@ -301,7 +301,7 @@ paths:
 ### 3f. Why this is tractable here (and why it's Rust's hard part)
 
 Rust's borrow checker is modular (public signatures, generics, HRTB, NLL) and
-runs before monomorphization. SpicyLang specializes first and analyzes second,
+runs before monomorphization. Merlin specializes first and analyzes second,
 so the checker sees only concrete lifetimes and concrete types. The genuinely
 hard remaining piece is **closure captures** (3c) and **higher-order
 functions returning borrows** (`filter : (a -> &bool) -> ...`); everything else

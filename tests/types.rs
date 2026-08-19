@@ -1,5 +1,5 @@
-use spicylang2::types::*;
-use spicylang2::ast::*;
+use merlin_lang::types::*;
+use merlin_lang::ast::*;
 use std::collections::HashMap;
 
 fn var(name: &str) -> Monotype {
@@ -248,47 +248,52 @@ fn ok(sub_pairs: Vec<(&str, Monotype)>) -> Result<Substitution, UnificationError
     Ok(sub(sub_pairs))
 }
 
+fn unify_types(t1: &Monotype, t2: &Monotype) -> Result<Substitution, UnificationError> {
+    let mut ctx = TypeContext::new();
+    unify(&mut ctx, t1, t2)
+}
+
 #[test]
 fn unify_same_var() {
-    assert_eq!(unify(&var("a"), &var("a")), ok(vec![]));
+    assert_eq!(unify_types(&var("a"), &var("a")), ok(vec![]));
 }
 
 #[test]
 fn unify_diff_vars() {
-    assert_eq!(unify(&var("a"), &var("b")), ok(vec![("a", var("b"))]));
+    assert_eq!(unify_types(&var("a"), &var("b")), ok(vec![("a", var("b"))]));
 }
 
 #[test]
 fn unify_var_and_concrete() {
-    assert_eq!(unify(&var("a"), &int()), ok(vec![("a", int())]));
+    assert_eq!(unify_types(&var("a"), &int()), ok(vec![("a", int())]));
 }
 
 #[test]
 fn unify_concrete_and_var() {
-    assert_eq!(unify(&int(), &var("a")), ok(vec![("a", int())]));
+    assert_eq!(unify_types(&int(), &var("a")), ok(vec![("a", int())]));
 }
 
 #[test]
 fn unify_same_concrete() {
-    assert_eq!(unify(&int(), &int()), ok(vec![]));
+    assert_eq!(unify_types(&int(), &int()), ok(vec![]));
 }
 
 #[test]
 fn unify_different_concretes() {
-    let result = unify(&int(), &bool());
+    let result = unify_types(&int(), &bool());
     assert!(result.is_err());
 }
 
 #[test]
 fn unify_infinite_type() {
-    let result = unify(&var("a"), &fn_type(var("a"), int()));
+    let result = unify_types(&var("a"), &fn_type(var("a"), int()));
     assert!(result.is_err());
 }
 
 #[test]
 fn unify_fn_same_structure() {
     assert_eq!(
-        unify(&fn_type(var("a"), int()), &fn_type(var("b"), int())),
+        unify_types(&fn_type(var("a"), int()), &fn_type(var("b"), int())),
         ok(vec![("a", var("b"))])
     );
 }
@@ -296,14 +301,14 @@ fn unify_fn_same_structure() {
 #[test]
 fn unify_fn_chain_substitution() {
     assert_eq!(
-        unify(&fn_type(var("a"), int()), &fn_type(int(), var("b"))),
+        unify_types(&fn_type(var("a"), int()), &fn_type(int(), var("b"))),
         ok(vec![("a", int()), ("b", int())])
     );
 }
 
 #[test]
 fn unify_fn_different_constructors() {
-    let result = unify(&fn_type(int(), int()), &fn_type(int(), bool()));
+    let result = unify_types(&fn_type(int(), int()), &fn_type(int(), bool()));
     assert!(result.is_err());
 }
 
@@ -634,6 +639,118 @@ fn w_not_int_error() {
 fn w_not_string_error() {
     let mut ctx = TypeContext::new();
     let result = algo_w(&mut ctx, &mut unary(UnaryOp::Not, lit(Lit::Str("hi".to_string()))));
+    assert!(result.is_err());
+}
+
+// ---- Record/row helpers ---- //
+
+fn field_access(e: Box<Expr>, field: &str) -> Box<Expr> {
+    Box::new(Expr::from(ENode::FieldAccess(e, field.to_string())))
+}
+
+fn record_lit(fields: Vec<(&str, Box<Expr>)>) -> Box<Expr> {
+    Box::new(Expr::from(ENode::Record(
+        fields.into_iter().map(|(n, e)| FieldAssn { field: n.to_string(), exp: e }).collect(),
+    )))
+}
+
+fn with_expr(e: Box<Expr>, fields: Vec<(&str, Box<Expr>)>) -> Box<Expr> {
+    Box::new(Expr::from(ENode::With(
+        e,
+        fields.into_iter().map(|(n, e)| FieldAssn { field: n.to_string(), exp: e }).collect(),
+    )))
+}
+
+fn rec(inner: Monotype) -> Monotype {
+    Monotype::rec(inner)
+}
+
+fn row_ext(label: &str, field: Monotype, rest: Monotype) -> Monotype {
+    Monotype::row_ext(label.to_string(), field, rest)
+}
+
+fn empty_row() -> Monotype {
+    Monotype::empty_row()
+}
+
+// ===== W: records =====
+
+#[test]
+fn w_record_literal() {
+    let mut ctx = TypeContext::new();
+    let result = algo_w(&mut ctx, &mut record_lit(vec![
+        ("bar", lit(Lit::Int(1))),
+        ("baz", lit(Lit::Bool(true))),
+    ]));
+    assert!(result.is_ok());
+    let (_sub, typ) = result.unwrap();
+    assert_eq!(typ, rec(row_ext("baz", bool(), row_ext("bar", int(), empty_row()))));
+}
+
+#[test]
+fn w_field_access_concrete() {
+    let mut ctx = TypeContext::new();
+    let result = algo_w(&mut ctx, &mut field_access(
+        record_lit(vec![("bar", lit(Lit::Int(1)))]),
+        "bar",
+    ));
+    assert!(result.is_ok());
+    let (_sub, typ) = result.unwrap();
+    assert_eq!(typ, int());
+}
+
+#[test]
+fn w_field_access_on_variable() {
+    // `\x => x.name` is typable without a nominal record: the lambda's
+    // parameter is constrained to `{ name: α | ρ }` and the result is `α`.
+    let mut ctx = TypeContext::new();
+    let result = algo_w(&mut ctx, &mut lam_infer("x", field_access(v("x"), "name")));
+    assert!(result.is_ok());
+    let (_sub, typ) = result.unwrap();
+    match typ {
+        Monotype::TypeFuncApplication(f, args) => {
+            assert_eq!(*f, TypeFunc::Fn);
+            assert_eq!(args.len(), 2);
+            assert!(matches!(&args[0], Monotype::TypeFuncApplication(g, _) if **g == TypeFunc::Rec));
+            assert!(matches!(&args[1], Monotype::TypeVariable(_)));
+        }
+        other => panic!("expected a function type, got {:?}", other),
+    }
+}
+
+#[test]
+fn w_field_access_missing_field_error() {
+    let mut ctx = TypeContext::new();
+    let result = algo_w(&mut ctx, &mut field_access(
+        record_lit(vec![("bar", lit(Lit::Int(1)))]),
+        "baz",
+    ));
+    assert!(result.is_err());
+}
+
+#[test]
+fn w_field_access_on_int_error() {
+    let mut ctx = TypeContext::new();
+    let result = algo_w(&mut ctx, &mut field_access(lit(Lit::Int(1)), "bar"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn w_with_update() {
+    let mut ctx = TypeContext::new();
+    let result = algo_w(&mut ctx, &mut with_expr(
+        record_lit(vec![("bar", lit(Lit::Int(1))), ("baz", lit(Lit::Bool(true)))]),
+        vec![("bar", lit(Lit::Int(2)))],
+    ));
+    assert!(result.is_ok());
+    let (_sub, typ) = result.unwrap();
+    assert_eq!(typ, rec(row_ext("baz", bool(), row_ext("bar", int(), empty_row()))));
+}
+
+#[test]
+fn w_with_on_int_error() {
+    let mut ctx = TypeContext::new();
+    let result = algo_w(&mut ctx, &mut with_expr(lit(Lit::Int(1)), vec![("bar", lit(Lit::Int(2)))]));
     assert!(result.is_err());
 }
 

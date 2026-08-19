@@ -1,5 +1,5 @@
-use spicylang2::display::render_type;
-use spicylang2::types::Monotype;
+use merlin_lang::display::render_type;
+use merlin_lang::types::Monotype;
 
 fn var(name: &str) -> Monotype {
     Monotype::var(name.to_string())

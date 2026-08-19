@@ -1254,9 +1254,18 @@ fn resolve_expr_types(expr : &mut Expr, sub : &Substitution) {
                 resolve_expr_types(&mut c.exp, sub);
             }
         },
-        ENode::FieldAccess(expr, expr1) => todo!(),
-        ENode::Record(field_assns) => todo!(),
-        ENode::With(expr, field_assns) => todo!(),
+        ENode::FieldAccess(e, _) => resolve_expr_types(e, sub),
+        ENode::Record(fields) => {
+            for fa in fields.iter_mut() {
+                resolve_expr_types(&mut fa.exp, sub);
+            }
+        },
+        ENode::With(e, fields) => {
+            resolve_expr_types(e, sub);
+            for fa in fields.iter_mut() {
+                resolve_expr_types(&mut fa.exp, sub);
+            }
+        },
     }
 }
 

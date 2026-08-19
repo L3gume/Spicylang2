@@ -1,4 +1,4 @@
-# Spicylang prelude
+# Merlin prelude
 
 #
 # UTILITY TYPES & FUNCTIONS
@@ -142,7 +142,7 @@ let find = \pred ls => match ls
 
 let find_val = \val ls => match ls
     | [] => None
-    | x::xs => (if x == val then Some x else find val xs);
+    | x::xs => (if x == val then Some x else find_val val xs);
 
 # tail-recursive filter
 let tfilter = \pred ls =>

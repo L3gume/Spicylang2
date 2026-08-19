@@ -260,7 +260,6 @@ pub struct Stmt {
     pub s : Box<SNode>,
     pub ctx : TypeContext,
     pub pos : Pos
-    // TODO
 }
 
 impl Display for Stmt {
@@ -330,9 +329,11 @@ impl Display for ENode {
             ENode::List(exprs) => write!(f, "List({})", exprs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")),
             ENode::Cons(expr, expr1) => write!(f, "Cons({}, {})", expr, expr1),
             ENode::Match(expr, match_cases) => write!(f, "Match({}, {})", expr, match_cases.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")),
-            ENode::FieldAccess(expr, expr1) => write!(f, "Field({}, {})", expr, expr1),
-            ENode::Record(field_assns) => todo!(),
-            ENode::With(expr, field_assns) => todo!(),
+            ENode::FieldAccess(expr, field) => write!(f, "Field({}, {})", expr, field),
+            ENode::Record(field_assns) => write!(f, "Record({})",
+                field_assns.iter().map(|fa| format!("{}: {}", fa.field, fa.exp)).collect::<Vec<_>>().join(", ")),
+            ENode::With(expr, field_assns) => write!(f, "With({}, {})", expr,
+                field_assns.iter().map(|fa| format!("{}: {}", fa.field, fa.exp)).collect::<Vec<_>>().join(", ")),
         }
     }
 }
@@ -466,9 +467,18 @@ fn fill_expr_positions(expr : &mut Expr, index : &LineIndex) {
                 fill_expr_positions(&mut c.exp, index);
             }
         },
-        ENode::FieldAccess(expr, expr1) => todo!(),
-        ENode::Record(field_assns) => todo!(),
-        ENode::With(expr, field_assns) => todo!(),
+        ENode::FieldAccess(e, _) => fill_expr_positions(e, index),
+        ENode::Record(fields) => {
+            for fa in fields.iter_mut() {
+                fill_expr_positions(&mut fa.exp, index);
+            }
+        },
+        ENode::With(e, fields) => {
+            fill_expr_positions(e, index);
+            for fa in fields.iter_mut() {
+                fill_expr_positions(&mut fa.exp, index);
+            }
+        },
     }
 }
 

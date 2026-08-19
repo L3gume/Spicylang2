@@ -11,7 +11,7 @@ Two layers, because they need different treatment:
    `bool_to_str`. Seeded as polytypes in the context (so inference is free), then
    lowered as *real first-class MLIR functions* (so no special dispatch anywhere).
 2. **Prelude** — `map`, `filter`, `length`, `append`, `reverse`, `foldl/r`, etc.
-   Written in Spicylang itself, injected into every program, and run through the
+   Written in Merlin itself, injected into every program, and run through the
    *existing* lambda-specialization machinery. Zero new compiler code for these.
 
 Design rationale (vs. the alternatives):
@@ -99,7 +99,7 @@ After this, `print x` is just `Application(Variable("print"), x)` via `Name`.
 
 ## Phase 3 — Prelude
 
-**3a. Location.** New `src/prelude.rs` with `include_str!("prelude.spcy")` and a
+**3a. Location.** New `src/prelude.rs` with `include_str!("prelude.mln")` and a
 `OnceLock<Vec<Stmt>>` that parses it once. Written in the language: lambdas,
 `match`, cons, recursion, arithmetic — all of which exist.
 
@@ -156,7 +156,7 @@ through to `module.abstractions`, apply.rs:338); recursion works via `self_name`
 - **Typecheck unit tests** (`ast.rs`/`types.rs`): `int_to_str 42 : str`;
   wrong-arg-type error; `map print`; redefinition of a builtin errors; shadowing
   a prelude name is allowed.
-- **Integration**: a `programs/prelude.spcy` exercising conversions +
+- **Integration**: a `programs/prelude.mln` exercising conversions +
   `map`/`filter`/`length` end-to-end, plus `map print` to prove print is
   first-class.
 - **Regression**: run the existing suite — the only expected churn is the deleted

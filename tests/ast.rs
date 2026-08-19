@@ -1,5 +1,5 @@
-use spicylang2::ast::*;
-use spicylang2::types::*;
+use merlin_lang::ast::*;
+use merlin_lang::types::*;
 
 
 fn parse(src: &str) -> Box<Program> {
@@ -1340,4 +1340,153 @@ fn typecheck_error_carries_position() {
     let err = Program::typecheck(&mut p).unwrap_err();
     let pos = err.pos.expect("typecheck error should carry a position");
     assert_eq!((pos.start_line, pos.start_col), (3, 1));
+}
+
+// ---- Records: parsing ----
+
+fn fa(name: &str, e: Box<Expr>) -> FieldAssn {
+    FieldAssn { field: name.to_string(), exp: e }
+}
+
+#[test]
+fn record_declaration() {
+    let p = parse("record Foo = { bar: int, baz: str };");
+    assert_eq!(
+        &*first(&p).s,
+        &SNode::TypeDecl(
+            TypeHeader { n: "Foo".to_string(), tvars: vec![] },
+            Box::new(TypeDec::Record(vec![
+                Binding("bar".to_string(), mono(Monotype::int())),
+                Binding("baz".to_string(), mono(Monotype::string())),
+            ]))
+        )
+    );
+}
+
+#[test]
+fn record_declaration_with_type_var() {
+    let p = parse("record Poly('a) = { bar: 'a };");
+    assert_eq!(
+        &*first(&p).s,
+        &SNode::TypeDecl(
+            TypeHeader { n: "Poly".to_string(), tvars: vec!["a".to_string()] },
+            Box::new(TypeDec::Record(vec![
+                Binding("bar".to_string(), mono(Monotype::var("a".to_string()))),
+            ]))
+        )
+    );
+}
+
+#[test]
+fn record_literal() {
+    let p = parse(r#"Foo { bar: 1, baz: "x" };"#);
+    assert_eq!(
+        &*first(&p).s,
+        &SNode::Expr(Box::new(Expr::from(ENode::Record(vec![
+            fa("bar", Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1)))))),
+            fa("baz", Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("x".to_string())))))),
+        ]))))
+    );
+}
+
+#[test]
+fn field_access() {
+    let p = parse("x.bar;");
+    assert_eq!(
+        &*first(&p).s,
+        &SNode::Expr(Box::new(Expr::from(ENode::FieldAccess(
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            "bar".to_string(),
+        ))))
+    );
+}
+
+#[test]
+fn nested_field_access() {
+    let p = parse("x.a.b;");
+    assert_eq!(
+        &*first(&p).s,
+        &SNode::Expr(Box::new(Expr::from(ENode::FieldAccess(
+            Box::new(Expr::from(ENode::FieldAccess(
+                Box::new(Expr::from(ENode::Variable("x".to_string()))),
+                "a".to_string(),
+            ))),
+            "b".to_string(),
+        ))))
+    );
+}
+
+#[test]
+fn with_update() {
+    let p = parse("x with { bar: 1 };");
+    assert_eq!(
+        &*first(&p).s,
+        &SNode::Expr(Box::new(Expr::from(ENode::With(
+            Box::new(Expr::from(ENode::Variable("x".to_string()))),
+            vec![fa("bar", Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1))))))],
+        ))))
+    );
+}
+
+#[test]
+fn record_pattern_in_match() {
+    let p = parse("match x | Foo { bar: n, baz: opt } => n | _ => 0;");
+    let SNode::Expr(e) = &*first(&p).s else { panic!("expected Expr") };
+    let ENode::Match(_, cases) = &*e.e else { panic!("expected Match") };
+    assert_eq!(cases.len(), 2);
+    let ENode::Record(fields) = &*cases[0].val.e else { panic!("expected Record pattern") };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].field, "bar");
+    assert_eq!(fields[1].field, "baz");
+}
+
+// ---- Records: typechecking ----
+
+#[test]
+fn typecheck_record_decl_and_literal() {
+    let mut p = parse("record Foo = { bar: int }; let x = Foo { bar: 1 }; x.bar;");
+    assert!(Program::typecheck(&mut p).is_ok());
+}
+
+#[test]
+fn typecheck_record_field_access() {
+    let mut p = parse(r#"record Foo = { bar: int, baz: str }; let x = Foo { bar: 1, baz: "hi" }; x.bar;"#);
+    assert!(Program::typecheck(&mut p).is_ok());
+}
+
+#[test]
+fn typecheck_record_with_update() {
+    let mut p = parse(r#"record Foo = { bar: int, baz: str }; let x = Foo { bar: 1, baz: "hi" }; let y = x with { bar: 2 }; y.bar;"#);
+    assert!(Program::typecheck(&mut p).is_ok());
+}
+
+#[test]
+fn typecheck_record_pattern() {
+    let mut p = parse(r#"record Foo = { bar: int, baz: str }; let x = Foo { bar: 1, baz: "hi" }; match x | Foo { bar: n, baz: opt } => n | _ => 0;"#);
+    assert!(Program::typecheck(&mut p).is_ok());
+}
+
+#[test]
+fn typecheck_field_access_on_variable() {
+    // Structural: `\x => x.bar` is typable without knowing the record name.
+    let mut p = parse("\\x => x.bar;");
+    assert!(Program::typecheck(&mut p).is_ok());
+}
+
+#[test]
+fn typecheck_missing_field_error() {
+    let mut p = parse("record Foo = { bar: int }; let x = Foo { bar: 1 }; x.baz;");
+    assert!(Program::typecheck(&mut p).is_err());
+}
+
+#[test]
+fn typecheck_field_access_on_int_error() {
+    let mut p = parse("let x = 1; x.bar;");
+    assert!(Program::typecheck(&mut p).is_err());
+}
+
+#[test]
+fn typecheck_with_on_int_error() {
+    let mut p = parse("let x = 1; x with { bar: 2 };");
+    assert!(Program::typecheck(&mut p).is_err());
 }

@@ -143,7 +143,7 @@ pub struct Module<'a> {
     /// Enum constructors: constructor name → `(enum name, variant index,
     /// arity)`. Built when an enum is declared.
     constructors: HashMap<String, (String, usize, usize)>,
-    /// The resolved Spicylang type of the `@__main` entry function's return
+    /// The resolved Merlin type of the `@__main` entry function's return
     /// value, used by the JIT to interpret the result slot.
     entry_return_monotype: Option<Monotype>,
     /// Name of the source being compiled (file path or `"<repl>"`), attached
@@ -217,7 +217,7 @@ impl<'a> Module<'a> {
         &mut self.module
     }
 
-    /// The resolved Spicylang type of the entry function's return value, if
+    /// The resolved Merlin type of the entry function's return value, if
     /// any. `None` means the entry function returns unit.
     pub fn entry_return_monotype(&self) -> Option<&Monotype> {
         self.entry_return_monotype.as_ref()

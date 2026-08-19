@@ -4,8 +4,8 @@
 //! cover the closure/application machinery that the AST and type-checker unit
 //! tests cannot reach.
 
-use spicylang2::ast;
-use spicylang2::codegen;
+use merlin_lang::ast;
+use merlin_lang::codegen;
 
 /// Parse (optionally with the prelude prepended), typecheck, lower, and JIT
 /// run `source`, returning the value of the trailing expression statement.
@@ -419,14 +419,14 @@ fn readin_lowers() {
 #[test]
 fn codegen_ops_carry_source_locations() {
     let mut prog = ast::Program::parse("let x = 1;\nx + 2;").unwrap();
-    prog.source_name = "test.spcy".to_string();
+    prog.source_name = "test.mln".to_string();
     ast::Program::typecheck(&mut prog).unwrap();
     let context = codegen::new_context();
     let module = codegen::lower(&prog, &context).unwrap();
     let dump = module.dump();
     // The `1` literal and the `x + 2` statement must carry real locations.
-    assert!(dump.contains("test.spcy:1:9"), "missing stmt-1 loc in:\n{dump}");
-    assert!(dump.contains("test.spcy:2:1"), "missing stmt-2 loc in:\n{dump}");
+    assert!(dump.contains("test.mln:1:9"), "missing stmt-1 loc in:\n{dump}");
+    assert!(dump.contains("test.mln:2:1"), "missing stmt-2 loc in:\n{dump}");
 }
 
 // ----------------------------------------------------------------------------
@@ -464,7 +464,7 @@ fn tail_recursion_through_let_and_block() {
 
 #[test]
 fn tail_recursive_local_loop() {
-    // The tl_fib shape from programs/fib.spcy: a let-bound loop whose self
+    // The tl_fib shape from programs/fib.mln: a let-bound loop whose self
     // call is in tail position of the `else` branch.
     assert_eq!(
         expect_int(

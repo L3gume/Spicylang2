@@ -65,7 +65,7 @@ If it follows from context that e₀ has type σ and if it also follows from con
 
 Let bindings have the type of the last expression.
 
-SpicyLang's `let` is recursive: `x` is bound to a fresh type variable while `e₀` is checked, so `e₀` may itself reference `x`. The inferred type is then generalised and bound for `e₁` (see Generalisation).
+Merlin's `let` is recursive: `x` is bound to a fresh type variable while `e₀` is checked, so `e₀` may itself reference `x`. The inferred type is then generalised and bound for `e₁` (see Generalisation).
 
 ## If-Then-Else
 

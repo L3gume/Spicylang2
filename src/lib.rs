@@ -1,4 +1,4 @@
-//! Spicylang compiler library.
+//! Merlin compiler library.
 
 pub mod ast;
 pub mod codegen;

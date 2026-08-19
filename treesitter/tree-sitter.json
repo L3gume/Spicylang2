@@ -2,22 +2,22 @@
   "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
   "grammars": [
     {
-      "name": "spicylang",
-      "camelcase": "Spicylang",
-      "title": "Spicylang",
-      "scope": "source.spicylang",
+      "name": "merlin",
+      "camelcase": "Merlin",
+      "title": "Merlin",
+      "scope": "source.merlin",
       "file-types": [
-        "spicylang"
+        "mln"
       ],
-      "injection-regex": "^spicylang$",
-      "class-name": "TreeSitterSpicylang",
-      "highlights": "queries/spicylang/highlights.scm"
+      "injection-regex": "^merlin$",
+      "class-name": "TreeSitterMerlin",
+      "highlights": "queries/merlin/highlights.scm"
     }
   ],
   "metadata": {
     "version": "0.1.0",
     "license": "MIT",
-    "description": "tree-sitter parser for SpicyLang",
+    "description": "tree-sitter parser for Merlin",
     "authors": [
       {
         "name": "Justin Tremblay",
@@ -25,7 +25,7 @@
       }
     ],
     "links": {
-      "repository": "https://github.com/L3gume/Spicylang2",
+      "repository": "https://github.com/L3gume/merlin-lang",
       "funding": ""
     }
   },

@@ -1,5 +1,5 @@
 /**
- * Treesitter grammar for Spicylang, mirroring the LALR grammar in
+ * Treesitter grammar for Merlin, mirroring the LALR grammar in
  * src/grammar.lalrpop.
  *
  * The precedence cascade (lowest to highest) matches grammar.lalrpop:
@@ -20,7 +20,7 @@ const PREC = {
 };
 
 export default grammar({
-  name: 'spicylang',
+  name: 'merlin',
 
   word: $ => $.identifier,
 

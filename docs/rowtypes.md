@@ -1,6 +1,6 @@
-# Row Types for SpicyLang Records
+# Row Types for Merlin Records
 
-This document describes how to replace SpicyLang's *nominal* record types with
+This document describes how to replace Merlin's *nominal* record types with
 *structural* record types based on **row polymorphism**, and the steps required
 to implement it. It assumes the current state of `src/types.rs` (Hindley–Milner
 inference via Algorithm-W with a `Monotype`/`TypeFunc` representation, nominal
@@ -126,7 +126,7 @@ are given.
    With structural records, `Person { bar: n, … }` should match any record that
    *has* `bar`, binding `n`; the row variable `ρ` captures the fields not named.
    This is idiomatic for row types and matches the existing
-   `Foo { bar: n, baz: opt }` pattern in `programs/record.spcy` (which lists two
+   `Foo { bar: n, baz: opt }` pattern in `programs/record.mln` (which lists two
    of the record's fields).
 
 4. **Field ordering in codegen.** Rows are unordered, but memory layout is not;
@@ -280,7 +280,7 @@ wiring up the inference rules.
 
 * `tests/types.rs`: field access on a type variable (`\x => x.name`), `with`
   update, record construction, record patterns.
-* `programs/record.spcy`: already exercises construction, field access, `with`,
+* `programs/record.mln`: already exercises construction, field access, `with`,
   and a record pattern — use it as the end-to-end target once codegen lands.
 * Exhaustiveness and error cases: accessing a missing field, `with` on a
   non-record, infinite-row occurs-check.

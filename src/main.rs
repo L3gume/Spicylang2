@@ -1,5 +1,5 @@
 use std::process;
-use spicylang2::ast::Program;
+use merlin_lang::ast::Program;
 
 fn main() {
     let mut dump_ast = false;
@@ -15,14 +15,14 @@ fn main() {
             "--repl" => start_repl = true,
             "--prelude" => include_prelude = true,
             "--help" | "-h" => {
-                println!("usage: spicylang [--ast] [--repl] <file.spcy>");
+                println!("usage: merlin [--ast] [--repl] <file.mln>");
                 println!("  --ast    dump the program's AST after it completes");
                 println!("  --repl   start the REPL with the program already in the context");
                 return;
             }
             s if s.starts_with('-') => {
                 eprintln!("error: unknown option `{}`", s);
-                eprintln!("usage: spicylang [--ast] [--repl] <file.spcy>");
+                eprintln!("usage: merlin [--ast] [--repl] <file.mln>");
                 process::exit(1);
             }
             s => file = Some(s.to_string()),
@@ -30,7 +30,7 @@ fn main() {
     }
 
     match file {
-        None => spicylang2::repl::repl_loop(None),
+        None => merlin_lang::repl::repl_loop(None),
         Some(path) => {
             let source = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
@@ -69,8 +69,8 @@ fn main() {
             }
             println!("typecheck: ok");
 
-            let context = spicylang2::codegen::new_context();
-            match spicylang2::codegen::lower(&prog, &context) {
+            let context = merlin_lang::codegen::new_context();
+            match merlin_lang::codegen::lower(&prog, &context) {
                 Ok(mut module) => {
                     println!(
                         "codegen: ok ({} top-level functions)",
@@ -92,19 +92,19 @@ fn main() {
             }
 
             if start_repl {
-                spicylang2::repl::repl_loop(Some(prog));
+                merlin_lang::repl::repl_loop(Some(prog));
             }
         }
     }
 }
 
 /// Emit a native object file and link it into an executable named after the
-/// source file (with the `.spcy` extension stripped).
-fn compile_executable(source_path: &str, module: &mut spicylang2::codegen::Module) {
+/// source file (with the `.mln` extension stripped).
+fn compile_executable(source_path: &str, module: &mut merlin_lang::codegen::Module) {
     let output_path = std::path::Path::new(source_path).with_extension("");
-    let obj_path = std::env::temp_dir().join(format!("spicylang_{}.o", process::id()));
+    let obj_path = std::env::temp_dir().join(format!("merlin_{}.o", process::id()));
 
-    if let Err(e) = spicylang2::codegen::compile(module, obj_path.to_str().unwrap()) {
+    if let Err(e) = merlin_lang::codegen::compile(module, obj_path.to_str().unwrap()) {
         eprintln!("codegen: error: {}", e);
         process::exit(3);
     }

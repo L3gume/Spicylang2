@@ -3,7 +3,7 @@
 ## lambdas as application arguments? (FIXED)
 
 ```
-❯ cargo run src/prelude/prelude.spcy --repl
+❯ cargo run src/prelude/prelude.mln --repl
 warning: unused import: `crate::prelude`
  --> src/ast.rs:3:5
   |
@@ -32,9 +32,9 @@ warning: unused variable: `cases`
 1048 |         ENode::Match(scrutinee, cases) => {
      |                                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_cases`
 
-warning: `spicylang2` (bin "spicylang2") generated 4 warnings (run `cargo fix --bin "spicylang2" -p spicylang2` to apply 4 suggestions)
+warning: `merlin-lang` (bin "merlin-lang") generated 4 warnings (run `cargo fix --bin "merlin-lang" -p merlin-lang` to apply 4 suggestions)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
-     Running `target/debug/spicylang2 src/prelude/prelude.spcy --repl`
+     Running `target/debug/merlin-lang src/prelude/prelude.mln --repl`
 parse: ok
 typecheck: ok
 codegen: ok (1 top-level functions)
