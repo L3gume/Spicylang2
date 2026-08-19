@@ -18,6 +18,10 @@ not a serious language that is meant for production. If you really want
 to contribute or chat then please reach out but I have no ambition of creating
 the next mainstream language, you'd be better off with OCaml.
 
+## Why the name?
+
+The project needed a name and Merlin is a very good boy.
+
 ## Features
 
 - **Static typing with full type inference** — no annotations required, inferred
