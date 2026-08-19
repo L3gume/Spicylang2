@@ -96,9 +96,21 @@ pub(crate) fn free_variables(expr: &Expr) -> HashSet<String> {
             }
             fv
         }
-        ENode::FieldAccess(expr, expr1) => todo!(),
-        ENode::Record(field_assns) => todo!(),
-        ENode::With(expr, field_assns) => todo!(),
+        ENode::FieldAccess(e, _) => free_variables(e),
+        ENode::Record(_, field_assns) => {
+            let mut fv = HashSet::new();
+            for fa in field_assns {
+                union_into(&mut fv, free_variables(&fa.exp));
+            }
+            fv
+        }
+        ENode::With(e, field_assns) => {
+            let mut fv = free_variables(e);
+            for fa in field_assns {
+                union_into(&mut fv, free_variables(&fa.exp));
+            }
+            fv
+        }
     }
 }
 
@@ -121,6 +133,13 @@ pub(crate) fn pattern_bound_vars(pat: &Expr) -> Vec<String> {
             v
         }
         ENode::Application(_, arg) => pattern_bound_vars(arg),
+        ENode::Record(_, fields) => {
+            let mut v = Vec::new();
+            for fa in fields {
+                v.extend(pattern_bound_vars(&fa.exp));
+            }
+            v
+        }
         _ => vec![],
     }
 }

@@ -22,6 +22,7 @@ use super::enums::{
     PatternBind, destructure_pattern, enum_disc_eq, enum_variant_fields,
 };
 use super::lists::{list_elem, list_is_null, lower_cons, lower_list, integer_constant};
+use super::records::{extract_field, field_index, insert_field, record_fields, record_undef};
 use super::stmt::{ensure_extern, ptrtoint_i64, inttoptr_ptr};
 use super::types::lower_type;
 
@@ -60,9 +61,39 @@ pub(crate) fn lower_expr<'c, 'a>(
         ENode::Unary(op, e) => lower_unary(op, e, block, module, env, location),
         ENode::List(es) => lower_list(es, block, module, env, location),
         ENode::Cons(h, t) => lower_cons(h, t, block, module, env, location),
-        ENode::FieldAccess(expr, expr1) => todo!(),
-        ENode::Record(field_assns) => todo!(),
-        ENode::With(expr, field_assns) => todo!(),
+        ENode::FieldAccess(scrut, field) => {
+            let scrutinee = lower_expr(scrut, block, module, env)?;
+            let fields = record_fields(&default_free_vars(&scrut.typ))?;
+            let index = field_index(&fields, field)?;
+            let result_type = lower_type(&default_free_vars(&expr.typ), module)?;
+            extract_field(module, block, scrutinee, index as i32, result_type, location)
+        }
+        ENode::Record(_, field_assns) => {
+            let fields = record_fields(&default_free_vars(&expr.typ))?;
+            let struct_type = lower_type(&default_free_vars(&expr.typ), module)?;
+            let mut acc = record_undef(block, struct_type, location)?;
+            for (i, (label, _)) in fields.iter().enumerate() {
+                let fa = field_assns
+                    .iter()
+                    .find(|fa| &fa.field == label)
+                    .ok_or_else(|| {
+                        format!("codegen: missing field `{label}` in record construction")
+                    })?;
+                let value = lower_expr(&fa.exp, block, module, env)?;
+                acc = insert_field(module, block, acc, i as i32, value, location)?;
+            }
+            Ok(acc)
+        }
+        ENode::With(scrut, field_assns) => {
+            let mut acc = lower_expr(scrut, block, module, env)?;
+            let fields = record_fields(&default_free_vars(&scrut.typ))?;
+            for FieldAssn { field, exp } in field_assns {
+                let index = field_index(&fields, field)?;
+                let value = lower_expr(exp, block, module, env)?;
+                acc = insert_field(module, block, acc, index as i32, value, location)?;
+            }
+            Ok(acc)
+        }
     }
 }
 
@@ -686,6 +717,27 @@ pub(crate) fn case_pattern<'c>(
                 Some(variant_index),
             ))
         }
+        // A record pattern `Foo { bar: n, .. }` destructures the scrutinee's
+        // fields; each bound sub-pattern must be a plain variable.
+        ENode::Record(_, fields) => {
+            let rec_fields = record_fields(&default_free_vars(scrut_typ))?;
+            let mut bindings = Vec::new();
+            for fa in fields {
+                let name = match &*fa.exp.e {
+                    ENode::Variable(n) => n.clone(),
+                    _ => {
+                        return Err(
+                            "codegen: only variable record pattern fields are supported"
+                                .to_string(),
+                        )
+                    }
+                };
+                let index = field_index(&rec_fields, &fa.field)?;
+                let field_ty = lower_type(&default_free_vars(&rec_fields[index].1), module)?;
+                bindings.push((name, field_ty, index));
+            }
+            Ok((Some(PatternBind::Record { fields: bindings }), None))
+        }
         // A nullary constructor pattern `None`.
         ENode::Variable(name) => {
             let &(_, variant_index, arity) = module.constructors.get(name).ok_or_else(|| {
@@ -746,6 +798,9 @@ pub(crate) fn case_condition<'c, 'a>(
                 .map_err(|e| e.to_string())
                 .map(Into::into)
         }
+        // A record pattern always matches given the statically-known record
+        // scrutinee type, so its condition is a constant `true`.
+        ENode::Record(..) => bool_constant(module, block, true, location),
         // `Some x` / `None` match on the discriminant.
         _ => {
             let index = ctor_index.ok_or_else(|| {

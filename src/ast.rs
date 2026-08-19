@@ -307,7 +307,7 @@ pub enum ENode {
     Cons(Box<Expr>, Box<Expr>),
     Match(Box<Expr>, Vec<MatchCase>),
     FieldAccess(Box<Expr>, String),
-    Record(Vec<FieldAssn>),
+    Record(Option<String>, Vec<FieldAssn>),
     With(Box<Expr>, Vec<FieldAssn>)
     
 }
@@ -330,7 +330,8 @@ impl Display for ENode {
             ENode::Cons(expr, expr1) => write!(f, "Cons({}, {})", expr, expr1),
             ENode::Match(expr, match_cases) => write!(f, "Match({}, {})", expr, match_cases.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")),
             ENode::FieldAccess(expr, field) => write!(f, "Field({}, {})", expr, field),
-            ENode::Record(field_assns) => write!(f, "Record({})",
+            ENode::Record(name, field_assns) => write!(f, "Record({}, {})",
+                name.clone().unwrap_or_else(|| "_".to_string()),
                 field_assns.iter().map(|fa| format!("{}: {}", fa.field, fa.exp)).collect::<Vec<_>>().join(", ")),
             ENode::With(expr, field_assns) => write!(f, "With({}, {})", expr,
                 field_assns.iter().map(|fa| format!("{}: {}", fa.field, fa.exp)).collect::<Vec<_>>().join(", ")),
@@ -468,7 +469,7 @@ fn fill_expr_positions(expr : &mut Expr, index : &LineIndex) {
             }
         },
         ENode::FieldAccess(e, _) => fill_expr_positions(e, index),
-        ENode::Record(fields) => {
+        ENode::Record(_, fields) => {
             for fa in fields.iter_mut() {
                 fill_expr_positions(&mut fa.exp, index);
             }

@@ -650,6 +650,7 @@ fn field_access(e: Box<Expr>, field: &str) -> Box<Expr> {
 
 fn record_lit(fields: Vec<(&str, Box<Expr>)>) -> Box<Expr> {
     Box::new(Expr::from(ENode::Record(
+        None,
         fields.into_iter().map(|(n, e)| FieldAssn { field: n.to_string(), exp: e }).collect(),
     )))
 }

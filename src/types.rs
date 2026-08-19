@@ -697,7 +697,7 @@ fn algo_w_inner(context : &mut TypeContext, expr : &mut Expr) -> Result<(Substit
         ENode::Unary(op, e) => infer_unary(context, op, e),
         ENode::Literal(lit) => infer_literal(lit),
         ENode::FieldAccess(e, f) => infer_field_access(context, e, f),
-        ENode::Record(fs) => infer_record(context, fs),
+        ENode::Record(name, fs) => infer_record(context, name, fs),
         ENode::With(e, fs) => infer_with(context, e, fs),
     }
 }
@@ -985,7 +985,19 @@ fn infer_field_access(context : &mut TypeContext, expr : &mut Box<Expr>, field :
     Ok((s_unified.clone(), alpha.apply(&s_unified)))
 }
 
-fn infer_record(context : &mut TypeContext, field_assns : &mut Vec<FieldAssn>) -> Result<(Substitution, Monotype), UnificationError> {
+fn infer_record(context : &mut TypeContext, name : &mut Option<String>, field_assns : &mut Vec<FieldAssn>) -> Result<(Substitution, Monotype), UnificationError> {
+    match name {
+        Some(n) => {
+            let n = n.clone();
+            infer_named_record(context, &n, field_assns)
+        },
+        None => infer_anonymous_record(context, field_assns),
+    }
+}
+
+/// Infer an unnamed record literal: build a closed row from the fields in the
+/// order they are written.
+fn infer_anonymous_record(context : &mut TypeContext, field_assns : &mut Vec<FieldAssn>) -> Result<(Substitution, Monotype), UnificationError> {
     let mut combined = Substitution::new();
     let mut acc_row = Monotype::empty_row();
     for FieldAssn { field, exp } in field_assns {
@@ -996,6 +1008,67 @@ fn infer_record(context : &mut TypeContext, field_assns : &mut Vec<FieldAssn>) -
         acc_row = Monotype::row_ext(field.clone(), t1.apply(&s1), acc_row);
     }
     Ok((combined, Monotype::rec(acc_row)))
+}
+
+/// Infer `Name { field = value, ... }`: instantiate the declared record's type
+/// alias and unify each field value against the corresponding declared field
+/// type. The result is the declaration-ordered row, and missing or unknown
+/// fields are rejected.
+fn infer_named_record(context : &mut TypeContext, name : &str, field_assns : &mut Vec<FieldAssn>) -> Result<(Substitution, Monotype), UnificationError> {
+    let alias = context.get_alias(name).cloned()
+        .ok_or_else(|| UnificationError { pos: None, message: format!("Unknown record type `{}`", name) })?;
+
+    let mut sub = HashMap::new();
+    for p in &alias.params {
+        sub.insert(p.clone(), Monotype::var(context.new_typevar()));
+    }
+    let rec_type = alias.rhs.instantiate(&mut sub);
+
+    let declared = record_row_fields(&rec_type)?;
+
+    for fa in field_assns.iter() {
+        if !declared.iter().any(|(label, _)| label == &fa.field) {
+            return Err(UnificationError { pos: None, message: format!("Unknown field `{}` in record `{}`", fa.field, name) });
+        }
+    }
+
+    let mut combined = Substitution::new();
+    for (label, declared_ty) in &declared {
+        let fa = field_assns.iter_mut().find(|fa| &fa.field == label)
+            .ok_or_else(|| UnificationError { pos: None, message: format!("Missing field `{}` in record `{}`", label, name) })?;
+        let (s1, t1) = algo_w(context, &mut fa.exp)?;
+        combined = combined.combine(s1.clone());
+        *context = context.apply(&s1);
+        let s2 = unify(context, &declared_ty.apply(&combined), &t1)?;
+        *context = context.apply(&s2);
+        combined = combined.combine(s2);
+    }
+
+    Ok((combined.clone(), rec_type.apply(&combined)))
+}
+
+/// Walk a `Rec` record type into its `(label, field type)` list in row order.
+/// Errors if the row is not closed (an open row variable tail means the record
+/// was not fully resolved).
+fn record_row_fields(typ : &Monotype) -> Result<Vec<(String, Monotype)>, UnificationError> {
+    let row = match typ {
+        Monotype::TypeFuncApplication(f, args) if matches!(**f, TypeFunc::Rec) && args.len() == 1 => &args[0],
+        _ => return Err(UnificationError { pos: None, message: format!("Expected a record type, got {:?}", typ) }),
+    };
+    let mut fields = Vec::new();
+    let mut cur = row;
+    loop {
+        match cur {
+            Monotype::TypeFuncApplication(f, _) if matches!(**f, TypeFunc::EmptyRow) => break,
+            Monotype::TypeFuncApplication(f, args) if matches!(**f, TypeFunc::RowExt(_)) && args.len() == 2 => {
+                let label = match &**f { TypeFunc::RowExt(l) => l.clone(), _ => unreachable!() };
+                fields.push((label, args[0].clone()));
+                cur = &args[1];
+            },
+            _ => return Err(UnificationError { pos: None, message: "Record row is not closed".to_string() }),
+        }
+    }
+    Ok(fields)
 }
 
 fn infer_with(context : &mut TypeContext, expr : &mut Box<Expr>, field_assns : &mut Vec<FieldAssn>) -> Result<(Substitution, Monotype), UnificationError> {
@@ -1091,7 +1164,7 @@ pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -
             }
             Ok(combined)
         },
-        ENode::Record(fields) => {
+        ENode::Record(_, fields) => {
             let mut alphas : Vec<Monotype> = Vec::new();
             let mut row = Monotype::var(context.new_typevar());
             for FieldAssn { field, .. } in fields.iter().rev() {
@@ -1255,7 +1328,7 @@ fn resolve_expr_types(expr : &mut Expr, sub : &Substitution) {
             }
         },
         ENode::FieldAccess(e, _) => resolve_expr_types(e, sub),
-        ENode::Record(fields) => {
+        ENode::Record(_, fields) => {
             for fa in fields.iter_mut() {
                 resolve_expr_types(&mut fa.exp, sub);
             }

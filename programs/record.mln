@@ -1,7 +1,7 @@
 record Foo =
     {
         bar : int,
-        baz : option str
+        baz : Option str
     };
 
 record Poly('a) =

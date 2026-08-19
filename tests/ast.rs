@@ -1382,7 +1382,7 @@ fn record_literal() {
     let p = parse(r#"Foo { bar: 1, baz: "x" };"#);
     assert_eq!(
         &*first(&p).s,
-        &SNode::Expr(Box::new(Expr::from(ENode::Record(vec![
+        &SNode::Expr(Box::new(Expr::from(ENode::Record(Some("Foo".to_string()), vec![
             fa("bar", Box::new(Expr::from(ENode::Literal(Box::new(Lit::Int(1)))))),
             fa("baz", Box::new(Expr::from(ENode::Literal(Box::new(Lit::Str("x".to_string())))))),
         ]))))
@@ -1434,7 +1434,7 @@ fn record_pattern_in_match() {
     let SNode::Expr(e) = &*first(&p).s else { panic!("expected Expr") };
     let ENode::Match(_, cases) = &*e.e else { panic!("expected Match") };
     assert_eq!(cases.len(), 2);
-    let ENode::Record(fields) = &*cases[0].val.e else { panic!("expected Record pattern") };
+    let ENode::Record(_, fields) = &*cases[0].val.e else { panic!("expected Record pattern") };
     assert_eq!(fields.len(), 2);
     assert_eq!(fields[0].field, "bar");
     assert_eq!(fields[1].field, "baz");

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use super::Module;
 use super::closures::{load_field, store_field};
 use super::lists::{cell_struct_type, empty_list, integer_constant, malloc_call};
+use super::records::extract_field;
 
 // ----------------------------------------------------------------------------
 // Enums
@@ -69,6 +70,9 @@ pub(crate) enum PatternBind<'c> {
     Cons { head_name: String, head_type: Type<'c>, tail_name: String },
     /// `Some x`: load the payload fields from the enum's `data` pointer.
     Enum(Vec<(String, Type<'c>)>),
+    /// `Foo { bar: n, .. }`: extract the named fields of a record scrutinee.
+    /// Each entry is `(bound var, field type, field index)`.
+    Record { fields: Vec<(String, Type<'c>, usize)> },
 }
 
 /// Load the bindings of a match pattern inside `block`.
@@ -103,6 +107,14 @@ pub(crate) fn destructure_pattern<'c, 'x>(
                 let v =
                     load_field(module, block, data, payload_struct, i as i32, *typ, location)?;
                 out.push((name.clone(), v));
+            }
+            Ok(out)
+        }
+        Some(PatternBind::Record { fields }) => {
+            let mut out = Vec::new();
+            for (name, ty, index) in fields {
+                let v = extract_field(module, block, scrut, index as i32, ty, location)?;
+                out.push((name, v));
             }
             Ok(out)
         }

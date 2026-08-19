@@ -21,6 +21,7 @@ mod enums;
 mod execute;
 mod expr;
 mod lists;
+mod records;
 mod stmt;
 mod tail;
 mod types;
@@ -84,6 +85,18 @@ pub struct EnumLayout {
     pub variants: Vec<(String, Vec<Monotype>)>,
 }
 
+/// Layout of a declared record: its fields in declaration order.
+///
+/// Field order is the source of truth for the LLVM struct layout; the row in
+/// a record's type is unordered up to commutation, so codegen consults this
+/// registry (keyed by record name) rather than trusting the row order.
+pub struct RecordLayout {
+    /// The header's type parameter names (e.g. `a` in `Poly a`).
+    pub params: Vec<String>,
+    /// `(field name, field type)` in declaration order.
+    pub fields: Vec<(String, Monotype)>,
+}
+
 /// A polymorphic (or monomorphic) lambda binding `name = \p => body`, kept so
 /// a specialized `func.func` can be emitted on demand for every concrete type
 /// the binding is used at.
@@ -112,6 +125,8 @@ pub struct Module<'a> {
     functions: usize,
     /// Declared enum layouts, keyed by type name.
     enums: HashMap<String, EnumLayout>,
+    /// Declared record layouts, keyed by type name.
+    records: HashMap<String, RecordLayout>,
     /// Declared type aliases, keyed by alias name; the value is the expanded
     /// right-hand side, which may reference the header's type variables.
     aliases: HashMap<String, Monotype>,
@@ -159,6 +174,7 @@ impl<'a> Module<'a> {
             module: melior::ir::Module::new(melior::ir::Location::unknown(context)),
             functions: 0,
             enums: HashMap::new(),
+            records: HashMap::new(),
             aliases: HashMap::new(),
             strings: 0,
             malloc_declared: false,

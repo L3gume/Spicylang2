@@ -114,13 +114,13 @@ are given.
    existing `type_aliases`/`expand` machinery and lets `TypeFunc::Record`,
    `record_signatures`, etc. be deleted.
 
-2. **`with` semantics.** *(Recommended: update-only, Phase 1.)*
-   The current `with` only *changes* existing fields. Update-only needs no
-   "lacks" machinery: for each `(l = v)`, unify the scrutinee with
-   `Rec(RowExt(l)[τ_l, ρ])`, check `v : τ_l`, and the result is the scrutinee's
-   type. *Extending* a record with a new field (width change) additionally
-   requires a **lacks** constraint (`ρ` must not already contain `l`), which is
-   significantly harder (negative constraints). Defer extension to Phase 2.
+2. **`with` semantics — update-only.** `with` may only *change* the value of
+   fields that already exist on a record; it is impossible to add fields to a
+   record after it is declared. Update-only needs no "lacks" machinery: for each
+   `(l = v)`, unify the scrutinee with `Rec(RowExt(l)[τ_l, ρ])`, check
+   `v : τ_l`, and the result is the scrutinee's type. Width-changing `with`
+   (adding a field) is explicitly unsupported and rejected — no negative
+   ("lacks") constraints are implemented.
 
 3. **Record patterns: open or closed?** *(Recommended: open.)*
    With structural records, `Person { bar: n, … }` should match any record that
@@ -130,8 +130,10 @@ are given.
    of the record's fields).
 
 4. **Field ordering in codegen.** Rows are unordered, but memory layout is not;
-   codegen must fix a canonical layout — sort fields by label name at
-   record-construction time so the LLVM struct layout is deterministic.
+   codegen must fix a canonical layout. Layout follows the order in which the
+   record's fields are listed in its `record` declaration (not alphabetical),
+   so the LLVM struct layout is deterministic and matches the source declaration.
+   Construction, field access, and `with` all use this same declaration order.
 
 ---
 
@@ -267,9 +269,9 @@ wiring up the inference rules.
 ### Phase 4 — Display, codegen, and type resolution
 
 1. `src/display.rs:27` — render row/record types.
-2. `src/codegen/types.rs:17` — map a closed `Rec` row to an LLVM struct; sort
-   fields by label for a stable layout; reuse/extend the existing record codegen
-   stubs.
+2. `src/codegen/types.rs:17` — map a closed `Rec` row to an LLVM struct, laying
+   out fields in the record's declaration order; reuse/extend the existing
+   record codegen stubs.
 3. `resolve_expr_types` (line 1123) — implement the `FieldAccess`/`Record`/`With`
    arms (currently `todo!()`, line 1176) to recurse into their children so the
    final substitution reaches scrutinee/field/pattern types.
@@ -292,11 +294,12 @@ wiring up the inference rules.
 1. **Row unification with commutation.** The label-reordering rule interacts
    subtly with the occurs-check and with `Substitution::combine`; get this right
    and write dedicated unit tests before touching the inference rules.
-2. **`with` extension (lacks).** If width-changing `with` is ever wanted, it
-   needs negative constraints on row variables, which Algorithm-W does not
-   express naturally — likely a real constraint-solver extension.
+2. **`with` extension.** Adding fields via `with` is intentionally unsupported
+   (update-only), so no "lacks" constraints are needed. This removes what would
+   otherwise be the hardest part — negative constraints on row variables, which
+   Algorithm-W does not express naturally.
 3. **Codegen layout.** Rows are unordered but memory layout is not; the
-   canonical (label-sorted) layout must be consistent between construction,
+   canonical (declaration-order) layout must be consistent between construction,
    field access, and `with`, or runtime values will be misaligned.
 4. **Error messages.** Nominal records give clean "no field `x` on `Person`"
    errors; structural records give "cannot unify `{ x: α | ρ }` with `Int`",

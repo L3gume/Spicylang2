@@ -5,6 +5,8 @@ use melior::ir::r#type::{FunctionType, IntegerType};
 use melior::ir::Type;
 
 use super::Module;
+use super::apply::default_free_vars;
+use super::records::record_fields;
 
 // ----------------------------------------------------------------------------
 // Types
@@ -29,10 +31,24 @@ pub(crate) fn lower_type<'a>(typ: &Monotype, module: &Module<'a>) -> Result<Type
             TypeFunc::List => Err("codegen: list type lowering not implemented".to_string()),
             TypeFunc::Enum(_) => Type::parse(module.context, "!llvm.ptr")
                 .ok_or_else(|| "codegen: failed to create `!llvm.ptr`".to_string()),
-            TypeFunc::Rec => todo!(),
-            TypeFunc::RowExt(_) => todo!(),
-            TypeFunc::EmptyRow => todo!(),
+            TypeFunc::Rec | TypeFunc::RowExt(_) | TypeFunc::EmptyRow => {
+                Err("codegen: cannot lower a bare row constructor".to_string())
+            }
         },
+        // A record type lowers to a struct of its fields in row order
+        // (canonicalized to declaration order by the type checker).
+        Monotype::TypeFuncApplication(f, args)
+            if matches!(**f, TypeFunc::Rec) && args.len() == 1 =>
+        {
+            let fields = record_fields(typ)?;
+            let mut field_types: Vec<String> = Vec::new();
+            for (_, field) in &fields {
+                field_types.push(lower_type(&default_free_vars(field), module)?.to_string());
+            }
+            let struct_str = format!("!llvm.struct<({})>", field_types.join(", "));
+            Type::parse(module.context, &struct_str)
+                .ok_or_else(|| format!("codegen: failed to create record struct type `{struct_str}`"))
+        }
         // Curried function types lower to a single flat `FunctionType` taking
         // all parameters at once, matching the multi-argument specialization
         // shape emitted by codegen.

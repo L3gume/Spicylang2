@@ -13,7 +13,7 @@ use melior::ir::{
 };
 use std::collections::HashMap;
 
-use super::{AbstractionInfo, EnumLayout, Module};
+use super::{AbstractionInfo, EnumLayout, Module, RecordLayout};
 use super::apply::{default_free_vars, lower_string};
 use super::expr::lower_expr;
 use super::lists::{integer_constant, malloc_call};
@@ -1164,7 +1164,20 @@ pub fn lower_type_decl<'a>(
             module.enums.insert(header.n.clone(), layout);
         },
         TypeDec::Record(fields) => {
-            return Err("Not Implemented yet".to_string());
+            if module.records.contains_key(&header.n)
+                || module.aliases.contains_key(&header.n)
+                || module.enums.contains_key(&header.n)
+            {
+                return Err(format!("codegen: type `{}` is already declared", header.n));
+            }
+            let layout = RecordLayout {
+                params: header.tvars.clone(),
+                fields: fields
+                    .iter()
+                    .map(|b| (b.0.clone(), b.1.t.clone()))
+                    .collect(),
+            };
+            module.records.insert(header.n.clone(), layout);
         }
         TypeDec::Alias(rhs) => {
             if module.aliases.contains_key(&header.n) || module.enums.contains_key(&header.n) {
