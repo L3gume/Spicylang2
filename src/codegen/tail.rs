@@ -251,7 +251,7 @@ fn lower_tail_match_cases<'c, 'a: 'b, 'b>(
         return lower_tail(&case.exp, block, module, &mut case_env, tail);
     }
 
-    let cond = case_condition(case, ctor_index, scrut, block, module, location)?;
+    let cond = case_condition(case, ctor_index, scrut, scrut_typ, block, module, location)?;
     let then_block = Block::new(&[]);
     let else_block = Block::new(&[]);
     block.append_operation(cf::cond_br(

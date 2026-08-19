@@ -613,7 +613,7 @@ fn lower_match_cases<'c, 'a: 'b, 'b>(
         return lower_expr(&case.exp, block, module, &mut case_env);
     }
 
-    let cond = case_condition(case, ctor_index, scrut, block, module, location)?;
+    let cond = case_condition(case, ctor_index, scrut, scrut_typ, block, module, location)?;
 
     let mut then_env = env.clone();
     let then_block = Block::new(&[]);
@@ -717,24 +717,23 @@ pub(crate) fn case_pattern<'c>(
                 Some(variant_index),
             ))
         }
-        // A record pattern `Foo { bar: n, .. }` destructures the scrutinee's
-        // fields; each bound sub-pattern must be a plain variable.
+        // A record pattern `Foo { bar: n, baz: 69, .. }` binds variable fields
+        // and tests literal fields; each bound sub-pattern must be a variable.
         ENode::Record(_, fields) => {
             let rec_fields = record_fields(&default_free_vars(scrut_typ))?;
             let mut bindings = Vec::new();
             for fa in fields {
-                let name = match &*fa.exp.e {
-                    ENode::Variable(n) => n.clone(),
-                    _ => {
-                        return Err(
-                            "codegen: only variable record pattern fields are supported"
-                                .to_string(),
-                        )
+                match &*fa.exp.e {
+                    ENode::Variable(name) => {
+                        let index = field_index(&rec_fields, &fa.field)?;
+                        let field_ty = lower_type(&default_free_vars(&rec_fields[index].1), module)?;
+                        bindings.push((name.clone(), field_ty, index));
                     }
-                };
-                let index = field_index(&rec_fields, &fa.field)?;
-                let field_ty = lower_type(&default_free_vars(&rec_fields[index].1), module)?;
-                bindings.push((name, field_ty, index));
+                    ENode::Literal(_) => {}
+                    _ => {
+                        return Err("codegen: unsupported record pattern field".to_string())
+                    }
+                }
             }
             Ok((Some(PatternBind::Record { fields: bindings }), None))
         }
@@ -759,11 +758,13 @@ pub(crate) fn case_pattern<'c>(
 
 /// The `i1` condition under which a non-catch-all case matches: a literal
 /// compares for equality, `[]` tests for an empty list, `x::xs` tests for a
-/// non-empty list, and constructor patterns compare the discriminant.
+/// non-empty list, constructor patterns compare the discriminant, and a record
+/// pattern tests each literal field for equality.
 pub(crate) fn case_condition<'c, 'a>(
     case: &MatchCase,
     ctor_index: Option<usize>,
     scrut: Value<'c, 'a>,
+    scrut_typ: &Monotype,
     block: &'a Block<'c>,
     module: &mut Module<'c>,
     location: Location<'c>,
@@ -798,9 +799,40 @@ pub(crate) fn case_condition<'c, 'a>(
                 .map_err(|e| e.to_string())
                 .map(Into::into)
         }
-        // A record pattern always matches given the statically-known record
-        // scrutinee type, so its condition is a constant `true`.
-        ENode::Record(..) => bool_constant(module, block, true, location),
+        // A record pattern matches when each literal field equals its value;
+        // variable fields bind and impose no condition.
+        ENode::Record(_, fields) => {
+            let rec_fields = record_fields(&default_free_vars(scrut_typ))?;
+            let mut cond = bool_constant(module, block, true, location)?;
+            for fa in fields {
+                if let ENode::Literal(lit) = &*fa.exp.e {
+                    let index = field_index(&rec_fields, &fa.field)?;
+                    let field_ty = lower_type(&default_free_vars(&rec_fields[index].1), module)?;
+                    let field_val =
+                        extract_field(module, block, scrut, index as i32, field_ty, location)?;
+                    let lit_val = lower_literal(lit, block, module, location)?;
+                    let cmp = arith::cmpi(
+                        module.context,
+                        arith::CmpiPredicate::Eq,
+                        field_val,
+                        lit_val,
+                        location,
+                    );
+                    let cmp_val: Value<'c, 'a> = block
+                        .append_operation(cmp)
+                        .result(0)
+                        .map_err(|e| e.to_string())?
+                        .into();
+                    let and = arith_binop("arith.andi", cond, cmp_val, location)?;
+                    cond = block
+                        .append_operation(and)
+                        .result(0)
+                        .map_err(|e| e.to_string())?
+                        .into();
+                }
+            }
+            Ok(cond)
+        }
         // `Some x` / `None` match on the discriminant.
         _ => {
             let index = ctor_index.ok_or_else(|| {

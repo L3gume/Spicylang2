@@ -4,18 +4,37 @@ record Foo =
         baz : Option str
     };
 
+record Bar =
+    {
+        thing : int,
+        other : Foo
+    };
+
 record Poly('a) =
     {
         bar : 'a
     };
 
-let x = Foo { bar: 69, baz: Some "420" };
-
-let num = x.bar;
-let string = match x.baz
-    | Some s => s
-    | None => "";
 
 let match_foo = \rec => match rec
     | Foo { bar: n, baz: opt } => true
     | _ => false;
+
+let print_foo = \foo => println (match foo
+        | Foo { bar: 69, baz: _ } => "nice!"
+        | Foo { bar: n, baz: maybe_str } => (
+            match maybe_str
+            | Some s => s
+            | None => "None str"
+        )
+        | _ => "didn't match"
+    );
+
+let x1 = Foo { bar: 69, baz: Some "420" };
+let x2 = Foo { bar: 420, baz: None };
+let x3 = Bar { thing: 69, other: Foo { bar: 420, baz: Some "This is a string" } };
+
+print_foo x1;
+print_foo (x1 with { bar: 420 });
+print_foo x2;
+print_foo (x3.other);

@@ -960,16 +960,19 @@ fn infer_unary(context : &mut TypeContext, op : &mut UnaryOp, e : &mut Box<Expr>
     }
 }
 
-fn infer_literal(lit : &mut Box<Lit>) -> Result<(Substitution, Monotype), UnificationError> {
-    let typ = match lit.as_ref() {
+fn literal_monotype(lit : &Lit) -> Monotype {
+    match lit {
         Lit::Int(_) => Monotype::int(),
         Lit::Bool(_) => Monotype::bool(),
         Lit::Str(_) => Monotype::string(),
         Lit::Float(_) => Monotype::float(),
         Lit::Char(_) => Monotype::char(),
         Lit::Unit => Monotype::unit(),
-    };
-    Ok((Substitution::new(), typ))
+    }
+}
+
+fn infer_literal(lit : &mut Box<Lit>) -> Result<(Substitution, Monotype), UnificationError> {
+    Ok((Substitution::new(), literal_monotype(lit)))
 }
 
 fn infer_field_access(context : &mut TypeContext, expr : &mut Box<Expr>, field : &mut String) -> Result<(Substitution, Monotype), UnificationError> {
@@ -1097,7 +1100,11 @@ fn infer_with(context : &mut TypeContext, expr : &mut Box<Expr>, field_assns : &
 
 pub fn type_pattern(context : &mut TypeContext, expr : &Expr, typ : &Monotype) -> Result<Substitution,UnificationError> {
     match &*expr.e {
-        ENode::Literal(_) => Ok(Substitution::new()),
+        ENode::Literal(lit) => {
+            let s = unify(context, typ, &literal_monotype(lit))?;
+            *context = context.apply(&s);
+            Ok(s)
+        },
         ENode::Variable(name) => {
             context.add(name.clone(), Polytype::Mono(Box::new(typ.clone())));
             Ok(Substitution::new())
